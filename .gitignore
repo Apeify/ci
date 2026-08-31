@@ -1,0 +1,4 @@
+# js-yaml is installed with `npm install --no-save` by both the dev container
+# and validate.yml's extractor step. There is no package.json here on purpose:
+# it is a throwaway tool dependency, not a project dependency.
+node_modules/

@@ -1,0 +1,57 @@
+# Thin stub for a Disaster Recovery (DR) target. The pipeline itself lives in
+# Apeify/ci - see https://github.com/Apeify/ci#readme for the full contract.
+#
+# Optional. Only add this if the site has a third deploy target - a standby
+# host, a preview account - that the two-branch mapping cannot express, since
+# one ref maps to exactly one environment.
+#
+# =========================================================================
+# WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
+# =========================================================================
+#
+# ENVIRONMENT (Settings -> Environments). Create one named to match the
+# `environment:` input below - `dr` as written here.
+#
+# It needs its OWN copy of everything the production environment has, because
+# it is a different host with different credentials:
+#
+#   Secrets    DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_USER, DEPLOY_BASE_DIR
+#              (required), DEPLOY_PORT, DEPLOY_HOST_KEY (optional)
+#   Variables  WEB_ROOT_DIRS (required), SITE_URL (optional)
+#
+# See deploy.yml's header for what each one means.
+#
+# WHY THIS IS A SEPARATE FILE
+#
+# The environment is hardcoded below rather than offered as a run-time choice.
+# Wiring it to a workflow_dispatch input would turn a reviewed,
+# version-controlled decision into a dropdown that includes production.
+# =========================================================================
+name: Deploy to DR host
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dr
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # DR mirrors production, so hold it to the same branch rule: deploy only
+    # from `main`, which is the branch promote.yml fast-forwards.
+    #
+    # PART of the rule, not all of it. For `production` the shared workflow
+    # applies two checks - the ref must be `main`, AND the commit being deployed
+    # must already be contained in `staging`. It cannot apply either to `dr`,
+    # because it has no way to know that `dr` is production-like, and only the
+    # first is expressible from out here: a caller job may carry `if:` even
+    # though it cannot carry `environment:`, but `if:` cannot inspect git
+    # history. In practice a DR run started from `main` right after a publish
+    # gets the second property anyway, by deploying the commit production
+    # already accepted.
+    if: github.ref == 'refs/heads/main'
+    uses: Apeify/ci/.github/workflows/deploy.yml@main
+    with:
+      environment: dr
+    secrets: inherit

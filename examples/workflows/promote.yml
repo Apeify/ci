@@ -1,0 +1,66 @@
+# Thin stub. The pipeline itself lives in Apeify/ci - see
+# https://github.com/Apeify/ci#readme for the full contract and the reasoning.
+#
+# The publish button: Actions tab -> "Publish to production" -> Run workflow.
+# It fast-forwards `main` to `staging`, then dispatches deploy.yml against
+# `main`. The live site updates when that SECOND run goes green.
+#
+# =========================================================================
+# WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
+# =========================================================================
+#
+# PERMISSIONS: granted on the job below, not repo-wide.
+#
+#   This workflow pushes `main` and dispatches the deploy, both using the
+#   built-in GITHUB_TOKEN. A called workflow can only DOWNGRADE the token it is
+#   handed - it cannot elevate - so the grant has to come from the calling job
+#   here. That is why `permissions:` sits on `publish` below.
+#
+#   Granting it here rather than flipping the repository to "Read and write
+#   permissions" keeps write scoped to this one job instead of handing it to
+#   every workflow in the repo.
+#
+#   Do NOT add a branch-protection rule requiring pull requests on `main`:
+#   publishing fast-forwards `main` from a workflow, and such a rule blocks
+#   exactly that push.
+#
+# SECRETS AND VARIABLES:
+#
+#   None of its own. It dispatches deploy.yml, which reads the environment
+#   secrets and variables listed in that stub's header.
+#
+# INPUTS - all optional. Default values are declared in the shared workflow
+# rather than restated here, so this file cannot go stale when one changes.
+#
+#   deploy-workflow  Filename of the deploy workflow to dispatch, as it
+#                    appears in .github/workflows/. Only needed if the deploy
+#                    stub is not called deploy.yml.
+#
+# WHAT IT REFUSES TO DO
+#
+#   If `main` holds any commit `staging` does not, it fails without pushing
+#   and prints the exact git commands to reconcile them. Do not publish by
+#   merging a `staging` -> `main` pull request: the merge commit makes the two
+#   branches drift, and enough drift breaks fast-forwarding permanently.
+# =========================================================================
+name: Publish to production
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  # One publish at a time, and never cancel one halfway: a canceled run could
+  # push main without starting the deploy, leaving main ahead of the live site.
+  group: publish-to-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Granted here because a called workflow cannot elevate the token it
+    # receives, only reduce it. Without this the shared workflow's own
+    # `permissions:` block asks for more than it was handed, and the run fails.
+    permissions:
+      contents: write # fast-forward and push `main`
+      actions: write # dispatch the deploy workflow
+    uses: Apeify/ci/.github/workflows/promote.yml@main
+    secrets: inherit

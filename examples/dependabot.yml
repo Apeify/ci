@@ -1,0 +1,77 @@
+# Copy to .github/dependabot.yml in the consuming repo.
+#
+# NOTE THE PATH. This is Dependabot configuration, not a workflow: it belongs at
+# .github/dependabot.yml, NOT in .github/workflows/. Putting it in the workflows
+# directory does nothing - GitHub will not read it there, and Actions will try
+# to run it as a workflow and fail.
+#
+# =========================================================================
+# WHY YOU WANT THIS
+# =========================================================================
+#
+# The deploy and promote stubs pin the shared pipeline to a commit SHA with a
+# version comment beside it:
+#
+#   uses: Apeify/ci/.github/workflows/deploy.yml@<sha>  # v1.4.0
+#
+# A pin is what stops a change in the shared repo from reaching this site
+# without anyone deciding it should. The cost is that the pin then has to be
+# moved by hand, and a pin nobody moves is a site running a pipeline nobody has
+# looked at in a year. Dependabot is what makes the pin maintainable: it opens a
+# pull request when a newer version exists, so updating is a review rather than
+# a chore somebody has to remember.
+#
+# It understands reusable-workflow references, not just `uses:` on steps, and it
+# updates the version COMMENT alongside the SHA - which is what makes that
+# comment trustworthy enough to review against. See the README's Versioning
+# section for what a major bump means.
+#
+# =========================================================================
+# target-branch IS NOT OPTIONAL HERE
+# =========================================================================
+#
+# Read this before deleting the line below.
+#
+# Dependabot targets the repository's DEFAULT branch unless told otherwise, and
+# on most repos that is `main`. Merging a Dependabot PR into `main` puts a commit
+# on `main` that `staging` does not have - and this pipeline's whole model is
+# that `main` only ever contains what `staging` already carried. From that point
+# on the publish button refuses to fast-forward, and a production deploy of that
+# commit is refused too, until someone repairs the branches by hand.
+#
+# So updates are aimed at `staging`, where every other change to the site lands.
+# They then reach production the same way everything else does, by publishing.
+#
+# If this repo's default branch IS `staging`, the line is redundant but harmless.
+# Leave it: it documents the requirement, and it keeps working if the default
+# branch is ever changed.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    # Covers everything `uses:` in .github/workflows - the pipeline stubs and any
+    # third-party action they call - plus an action.yml in the repository root if
+    # one exists. Other directories can be given their own entry if this repo
+    # keeps composite actions outside .github/, which most sites do not.
+    directory: "/"
+    schedule:
+      # Weekly. Daily turns a shared pipeline into a stream of pull requests
+      # nobody reads, and reviewing these carelessly is worse than updating
+      # slowly: merging one changes what deploys to the live site.
+      interval: "weekly"
+    # See above. Without this, merging an update breaks publishing.
+    target-branch: "staging"
+    # One pull request for all of them rather than one each. The noise from
+    # separate PRs is what gets update PRs ignored, and ignored updates are the
+    # failure this file exists to prevent.
+    #
+    # The trade is that a pipeline bump can ride along with unrelated action
+    # bumps, so read the version comment in the diff rather than the PR title:
+    # a major bump means a required input, secret, variable or server layout
+    # changed, and merging it without acting is what breaks the next deploy.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci"

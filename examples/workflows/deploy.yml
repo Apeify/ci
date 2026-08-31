@@ -1,0 +1,130 @@
+# Thin stub. The pipeline itself lives in Apeify/ci - see
+# https://github.com/Apeify/ci#readme for the full contract and the reasoning.
+#
+# =========================================================================
+# WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
+# =========================================================================
+#
+# ENVIRONMENTS (Settings -> Environments). Create two, named exactly:
+#
+#   production   deployed ONLY by promote.yml, and only from `main`
+#   staging      deployed automatically on every push to `staging`
+#
+# Those names are not arbitrary. The shared workflow maps `main` to
+# `production` and every other ref to `staging`. A third target - a Disaster
+# Recovery host, a preview account - needs its own environment and the
+# `environment:` input; see deploy-dr.yml.
+#
+# SECRETS, set on EACH environment (they hold different values per account):
+#
+#   DEPLOY_SSH_KEY   required  Unencrypted OpenSSH private key authorized on
+#                              that host. A PuTTY .ppk will NOT work; export
+#                              to OpenSSH format first.
+#   DEPLOY_HOST      required  SSH hostname.
+#   DEPLOY_USER      required  SSH username.
+#   DEPLOY_BASE_DIR  required  Absolute path to the directory CONTAINING the
+#                              web root(s) - on shared hosting usually the
+#                              account home, e.g. /home/username.
+#   DEPLOY_PORT      optional  SSH port. Defaults to 22.
+#   DEPLOY_HOST_KEY  optional  The host's known_hosts line(s), pasted whole.
+#                              Not a fingerprint - SSH needs the key itself.
+#                              Prefer a value your host PUBLISHES; failing
+#                              that, `ssh-keyscan your-host` (no -H, and keep
+#                              every key line it prints, not just the first).
+#                              Recommended: with it unset the deploy trusts
+#                              whatever key the server presents, on every run.
+#                              See the README's Host key pinning section.
+#
+# VARIABLES, set on EACH environment:
+#
+#   WEB_ROOT_DIRS    required  Web-root directory NAMES, ONE PER LINE, each
+#                              relative to DEPLOY_BASE_DIR. Usually one. List
+#                              more only if the app is built to serve several
+#                              hostnames from a single ACCOUNT: they sit side
+#                              by side under DEPLOY_BASE_DIR, receive the same
+#                              commit, and therefore share one app directory
+#                              and one set of runtime state.
+#   SITE_URL         optional  Public URL of this environment's site. Used
+#                              only for the link GitHub shows on the
+#                              deployment; unset just means no link.
+#
+# PERMISSIONS: nothing to do for this stub. The deploy only reads the repo.
+# promote.yml is the one that needs write, and it grants that on its own job -
+# see that stub.
+#
+# INPUTS this stub may pass under `with:`. All are optional. Their default
+# VALUES are declared in the shared workflow and deliberately not restated
+# here - a copy in this file would go stale the day one of them changes. See
+# the README, or the input descriptions in the shared deploy.yml itself.
+#
+#   php-version      PHP version used for lint and tests.
+#   public-dir       Repo directory whose CONTENTS are deployed to each web
+#                    root. Conventionally `public`.
+#   app-dir          Repo directory kept OUT of the web root. Conventionally
+#                    `app`.
+#   app-remote-dir   Name that directory takes ON THE SERVER. Set it only when
+#                    the server expects something other than app-dir.
+#   deploy-app-dir   Set false if the site has no private directory at all -
+#                    everything lives under the web root. The app-* inputs
+#                    above are then ignored entirely.
+#   environment      Override which environment is deployed to. Normally
+#                    derived from the branch; see deploy-dr.yml.
+#   public-excludes  rsync excludes for public-dir, ONE PER LINE. Supplying
+#                    this REPLACES the default list rather than adding to it,
+#                    so include anything from it you still need. .git and
+#                    .github are always excluded regardless.
+#   app-excludes     rsync excludes for app-dir, ONE PER LINE. Use for
+#                    server-managed state or server-only config that a deploy
+#                    must not overwrite.
+# =========================================================================
+name: Deploy site
+
+on:
+  push:
+    # staging only. `main` is intentionally absent, so pushing to main deploys
+    # nothing - that is what stops a stray commit reaching the live site by
+    # accident.
+    #
+    # It is NOT the whole story, and an earlier version of this comment claimed
+    # it was. workflow_dispatch below cannot be removed (promote.yml reaches
+    # this workflow by dispatching it), so anyone with write access can run
+    # this manually against `main`. The shared workflow closes that path
+    # itself: a production deploy is refused unless the commit being
+    # deployed is already contained in `staging`, which is the invariant
+    # promote.yml enforces before it fast-forwards.
+    branches: [staging]
+  workflow_dispatch:
+
+concurrency:
+  # One in-flight deploy per branch, and NEVER cancel one that is already
+  # running - on either branch.
+  #
+  # rsync defaults to --delete-during, so deletions interleave with the
+  # transfer. Killing a deploy partway leaves that web root half-deleted and
+  # half-updated. The next successful deploy repairs it, but that repair is
+  # conditional: if the run that did the canceling then fails - a bad commit,
+  # an SSH hiccup, a guard refusing it - the tree stays torn.
+  #
+  # Queueing instead means the in-flight deploy finishes and the tree is at
+  # least consistent at SOME commit before the next one starts.
+  #
+  # This applies to staging as much as production. The stakes differ, but the
+  # damage does not, and a half-deployed preview is actively misleading: the
+  # whole point of staging is judging whether a change is good, and a torn tree
+  # shows breakage that is not in the change.
+  #
+  # The cost is real but small: several rapid pushes deploy in sequence rather
+  # than collapsing into one, spending a few extra runner minutes. Cheaper than
+  # a preview nobody can trust.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    uses: Apeify/ci/.github/workflows/deploy.yml@main
+    # `inherit` rather than an explicit secrets map, and this is forced rather
+    # than lazy: the deploy credentials are ENVIRONMENT secrets, and a job that
+    # uses `uses:` cannot declare `environment:`. An explicit map would be
+    # evaluated here, in a context that never entered an environment, and would
+    # silently pass empty strings.
+    secrets: inherit

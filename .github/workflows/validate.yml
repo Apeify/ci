@@ -1,0 +1,321 @@
+name: Validate workflows
+
+# Lints the reusable workflows in this repository before they can reach a
+# consuming site.
+#
+# This is the one workflow here that DOES have real triggers. deploy.yml and
+# promote.yml are `workflow_call`-only and cannot run on their own; this one is
+# the reason pushing here does anything at all.
+#
+# WHY IT EXISTS
+#
+# A change to a shared pipeline lands on every consuming repo at once, and this
+# repo cannot deploy anything by itself - so a broken commit here would first be
+# discovered by a real site failing to deploy.
+#
+# FIVE LAYERS, ON PURPOSE
+#
+# 1. A structural floor: parse every workflow as YAML, then syntax-check the
+#    shell embedded in each `run:` block. It covers the two failure classes that
+#    have actually broken this code - a file that stops parsing after an
+#    indentation slip, and a `run:` block whose shell is broken and stays
+#    invisible until it executes on a live deploy.
+#
+#    This step needs js-yaml from npm. An earlier version of this comment called
+#    it self-contained and claimed it "still works if a download fails", which
+#    was never true of a step whose first action is `npm install`. Layer 5 is
+#    the one that genuinely needs nothing installed.
+#
+# 2. actionlint, which checks things nothing above can: the workflow SCHEMA
+#    (unknown keys, invalid `runs-on`, bad `needs:` references), and the
+#    expressions inside ${{ }} - including which contexts are legal in which
+#    position. It also runs shellcheck over the `run:` blocks, handling the
+#    ${{ }} substitution natively - which is why layer 4 covers only the
+#    scripts that live OUTSIDE a `run:` block.
+#
+# 3. The README/examples drift check, because the stubs are duplicated: the
+#    files under examples/ are what a consumer copies, and the README shows the
+#    same text inline. Nothing but this step stops the two from disagreeing,
+#    and a stale README stub is worse than none - it gets copied.
+#
+# 4. shellcheck over the standalone *.sh scripts. actionlint never sees them;
+#    they are not `run:` blocks. This is a real gap rather than a theoretical
+#    one - see the step itself.
+#
+# 5. The test suite in tests/, which pulls the shell back OUT of deploy.yml and
+#    runs it. Layers 1 to 4 all ask whether the code is well-formed; this one
+#    asks whether it does the right thing. Every defect that has reached a
+#    consuming site was well-formed shell that behaved wrongly - a guard above
+#    the gate meant to skip it, two sides of a comparison normalized
+#    differently, a refusal downgraded to a warning - and none of the layers
+#    above can see any of that. It needs only bash, awk and git.
+#
+# WHAT IT CANNOT DO
+#
+# It cannot test a DEPLOY. The tests above cover the validation logic, but there
+# is no host here and no credentials, by design, so nothing exercises rsync, ssh
+# or the server-side layout. The real integration test is to point one consuming
+# repo's stub at a branch of this repo and push to its `staging` - see the
+# Releasing section of MAINTAINING.md.
+
+# No `paths:` filter, deliberately.
+#
+# There was one, listing .github/workflows, examples, scripts and README.md.
+# Every file it left out turned out to be a file that changes what these checks
+# DO: .devcontainer/setup.sh (the script layer 4 exists for, so a commit fixing
+# it ran nothing), .actionlint-version (a transposed checksum would surface
+# later, on an unrelated edit, as a bare sha256sum failure), and
+# .github/actionlint.yaml, which sits beside the workflows directory rather than
+# inside it and so was never matched.
+#
+# A curated list is a second place for the truth to live, and it drifts silently
+# - the failure mode is a green commit that was never checked. What the filter
+# actually excluded was LICENSE and .gitignore. That is not worth the risk, so
+# everything runs on every push.
+on:
+  push:
+  pull_request:
+
+# Nothing here needs to write, and this repo holds no secrets. Fork pull
+# requests are therefore uninteresting to an attacker, but keep the token
+# minimal regardless. `contents: read` is required: checkout authenticates with
+# it.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Parse every workflow, and write each `run:` block out as its own script
+      # for the two checks that follow.
+      #
+      # js-yaml pinned to an exact version, the same way deploy.yml pins
+      # esbuild. Node is preinstalled on the runner; a YAML parser is not.
+      #
+      # GitHub expressions are substituted out before the scripts are written.
+      # `${{ ... }}` is not shell - bash reads `${{` as a parameter expansion
+      # with an invalid name - so leaving them in would produce failures that
+      # say nothing about the actual script. Replacing them with a plain
+      # identifier preserves the surrounding syntax, which is what is being
+      # checked.
+      - name: Parse workflows and extract embedded shell
+        shell: bash
+        run: |
+          mkdir -p /tmp/steps
+
+          # Installed rather than resolved out of an npx cache: one predictable
+          # path, no branch that behaves differently depending on what the
+          # runner image happens to have warmed.
+          npm install --no-save --silent js-yaml@4.1.0
+
+          cat > /tmp/extract.js <<'JS'
+          const fs = require('fs');
+          const path = require('path');
+          const yaml = require(process.argv[2]);
+
+          const dir = '.github/workflows';
+          let extracted = 0;
+          let failed = false;
+
+          for (const file of fs.readdirSync(dir).filter(f => /\.ya?ml$/.test(f)).sort()) {
+            const full = path.join(dir, file);
+            let doc;
+            try {
+              doc = yaml.load(fs.readFileSync(full, 'utf8'));
+            } catch (e) {
+              console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
+              failed = true;
+              continue;
+            }
+            console.log(`parsed ${full}`);
+
+            for (const [jobName, job] of Object.entries(doc.jobs || {})) {
+              for (const [i, step] of (job.steps || []).entries()) {
+                if (!step.run) continue;
+                const body = step.run.replace(/\$\{\{[^}]*\}\}/g, 'GH_EXPR');
+                const label = (step.name || `step${i}`).replace(/[^A-Za-z0-9]+/g, '_');
+                const out = `/tmp/steps/${path.parse(file).name}__${jobName}__${label}.sh`;
+                fs.writeFileSync(out, '#!/usr/bin/env bash\n' + body);
+                extracted++;
+              }
+            }
+          }
+
+          // Parse everything under examples/ too, at both levels, without
+          // extracting from it.
+          //
+          // The stubs in examples/workflows/ reach actionlint via
+          // scripts/lint-workflows.sh,
+          // but examples/dependabot.yml deliberately does not - actionlint
+          // rejects a Dependabot config outright - which left the one copyable
+          // artifact in the repo with no syntax coverage at all. A YAML parse is
+          // not a schema check, but it catches the failure that matters for a
+          // file people copy: one that does not load.
+          let examplesParsed = 0;
+          for (const dir of ['examples', 'examples/workflows']) {
+            if (!fs.existsSync(dir)) continue;
+            for (const file of fs.readdirSync(dir).filter(f => /\.ya?ml$/.test(f)).sort()) {
+              const full = path.join(dir, file);
+              try {
+                yaml.load(fs.readFileSync(full, 'utf8'));
+              } catch (e) {
+                console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
+                failed = true;
+                continue;
+              }
+              console.log(`parsed ${full}`);
+              examplesParsed++;
+            }
+          }
+
+          console.log(`extracted ${extracted} run-step(s)`);
+          if (examplesParsed === 0) {
+            console.log('::error::No examples were parsed - examples/ moved, or the filter is wrong.');
+            process.exit(1);
+          }
+          if (failed) process.exit(1);
+          if (extracted === 0) {
+            console.log('::error::No run-steps were extracted - the extractor is probably broken.');
+            process.exit(1);
+          }
+          JS
+
+          node /tmp/extract.js "$PWD/node_modules/js-yaml"
+
+      - name: Check embedded shell parses
+        shell: bash
+        run: |
+          fail=0
+          for s in /tmp/steps/*.sh; do
+            if ! bash -n "$s" 2>/tmp/err; then
+              echo "::error::bash syntax error in $(basename "$s")"
+              sed 's/^/    /' /tmp/err
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "all run-steps parse as bash"
+          exit "$fail"
+
+      # Version and hashes come from .actionlint-version, which the dev
+      # container's setup script reads too. One place to bump, and no way for
+      # local checks and CI to end up validating against different versions.
+      #
+      # The checksum is the actual pin. A version tag alone is mutable - if the
+      # release were ever re-cut under the same tag, the tag would still resolve
+      # and the download would silently change. Verifying against a hash stored
+      # in this repo means that swap fails the build instead.
+      #
+      # Verify before extracting or running: the point of a checksum is to be
+      # checked while the artifact is still inert.
+      - name: Install actionlint
+        shell: bash
+        run: |
+          . ./.actionlint-version
+
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+
+          curl -sSfL --retry 3 --max-time 120 -o "/tmp/${archive}" "$url"
+          echo "${ACTIONLINT_SHA256_LINUX_AMD64}  /tmp/${archive}" | sha256sum --check --strict -
+
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+          /tmp/actionlint --version
+
+      # actionlint finds .github/workflows itself. shellcheck is preinstalled on
+      # the runner image, and actionlint invokes it on `run:` blocks when present.
+      #
+      # examples/workflows/ has to be named explicitly: actionlint only scans
+      # the conventional workflow directory, and these deliberately live outside
+      # it.
+      # They must not sit in .github/workflows here - they carry real triggers,
+      # so GitHub would run them in THIS repo, where they have no secrets and no
+      # site to deploy to.
+      #
+      # A broken example is worse than no example, because it gets copied.
+      #
+      # scripts/lint-workflows.sh decides what gets linted, and both this step
+      # and the VS Code task call it so they cannot disagree. It lints
+      # examples/workflows/ and skips examples/dependabot.yml, which is
+      # configuration rather than a workflow and which actionlint rejects
+      # outright. That file is YAML-parsed by the extractor step above instead,
+      # so it is not left with no syntax coverage at all.
+      #
+      # Known limit: actionlint cannot resolve `uses: Apeify/ci/...@ref` against
+      # a remote repository, so it checks the examples' schema and syntax but
+      # not whether their `with:` keys match this workflow's declared inputs.
+      - name: Run actionlint
+        shell: bash
+        env:
+          ACTIONLINT: /tmp/actionlint
+        run: bash scripts/lint-workflows.sh
+
+      # The README reproduces each example inline so it can be read without
+      # navigating away. That duplication would drift - this repo has already
+      # produced several cases of documentation quietly disagreeing with
+      # behavior - so the two are compared mechanically instead of trusted.
+      #
+      # Each block is delimited in README.md by an HTML comment naming the file
+      # it mirrors, by repo-relative path:
+      # `<!-- example:examples/workflows/deploy.yml -->`, immediately before the
+      # fence.
+      # HTML comments are invisible when rendered, and an explicit marker is far
+      # more robust than inferring the block from a nearby heading.
+      #
+      # The examples are the source of truth. If this fails, regenerate the
+      # README block from the file, not the other way around.
+      # Extracted to a script because BOTH this workflow and the local VS Code
+      # task run it. Inlining it here and copying it into tasks.json would
+      # reintroduce the exact class of drift the check exists to prevent, one
+      # level up.
+      # Invoked via `bash` rather than executed directly, deliberately. This repo
+      # is edited on Windows, where git has core.fileMode=false and records new
+      # files as 100644 - so the exec bit does not survive into the checkout and
+      # `run: scripts/foo.sh` would fail with "Permission denied" on the runner.
+      # Calling bash explicitly is mode-independent and cannot regress.
+      - name: Check README matches examples/
+        shell: bash
+        run: bash scripts/check-readme-examples.sh
+
+      # actionlint only sees shell that lives inside a workflow `run:` block.
+      # Standalone scripts - .devcontainer/setup.sh, scripts/ and tests/ - are
+      # invisible to it, so without this step nothing automated checks them.
+      #
+      # That gap is not hypothetical: a broken shellcheck directive in setup.sh
+      # was found only by running the equivalent VS Code task by hand. This is
+      # the same invocation that task uses, so local and CI agree.
+      #
+      #   -x                       follow sourced files, so a `source=`
+      #                            directive is resolved rather than reported
+      #                            as SC1091
+      #   --source-path=SCRIPTDIR  resolve those directives relative to the
+      #                            SCRIPT, not the working directory
+      #
+      # Discovered with `git ls-files` so a new script is covered automatically
+      # and node_modules/ is never walked.
+      - name: Shellcheck standalone shell scripts
+        shell: bash
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh' | sort)
+
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "::warning::No tracked *.sh files found - is that expected?"
+            exit 0
+          fi
+
+          printf 'checking: %s\n' "${scripts[@]}"
+          shellcheck -x --source-path=SCRIPTDIR "${scripts[@]}"
+
+      # The only layer that tests BEHAVIOR rather than form, and the only one
+      # that needs nothing installed - bash, awk and git are all on the runner
+      # already. It is last because the layers above give better messages for
+      # the failures they catch: a YAML slip reported as "no run: body found for
+      # step X" would send a reader hunting in the wrong place.
+      #
+      # The suite extracts the shell from deploy.yml rather than restating it,
+      # so it cannot pass while the workflow is broken. See tests/run.sh.
+      - name: Run the test suite
+        shell: bash
+        run: bash tests/run.sh

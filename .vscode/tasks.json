@@ -1,0 +1,100 @@
+{
+	// Run with Terminal -> Run Task, or Ctrl+Shift+B for the default.
+	//
+	// These run inside the dev container, which provisions actionlint and
+	// shellcheck (see .devcontainer/). Outside it, they will not resolve.
+	//
+	// Together they cover the same ground as CI (.github/workflows/validate.yml)
+	// so a change can be checked before pushing. Where CI and a task run the
+	// same non-trivial logic, that logic lives in scripts/ and both call it -
+	// duplicating it here would reintroduce the drift these checks exist to
+	// catch.
+	"version": "2.0.0",
+	"tasks": [
+		{
+			// Parses every workflow against the Actions schema, checks the
+			// expressions inside ${{ }}, and runs shellcheck over each `run:`
+			// block.
+			//
+			// examples/workflows/ must be named explicitly. actionlint only
+			// scans the conventional workflow directory, and the stubs live
+			// outside it deliberately - they carry real triggers, so GitHub
+			// would run them in THIS repo if they sat in .github/workflows. A
+			// broken example is worse than no example, because it gets copied.
+			//
+			// Naming them is scripts/lint-workflows.sh's job, and CI runs the
+			// same script - the one place that decides what gets linted.
+			// examples/dependabot.yml is config, not a workflow, and is skipped.
+			//
+			// No problemMatcher: actionlint prints `file:line:col`, which the
+			// VS Code terminal already turns into a clickable link. A custom
+			// matcher would add nothing and would silently stop matching if the
+			// output were ever colorized.
+			"label": "Validate workflows and examples",
+			"type": "shell",
+			"command": "bash scripts/lint-workflows.sh",
+			"problemMatcher": []
+		},
+		{
+			// The same script CI runs, so local and CI cannot disagree about
+			// what "matching" means.
+			"label": "Check README matches examples",
+			"type": "shell",
+			// Invoked via `bash` for the same reason CI does: this repo is edited
+			// on Windows, where git records new files as non-executable, so the
+			// exec bit cannot be relied on inside the container.
+			"command": "bash",
+			"args": ["scripts/check-readme-examples.sh"],
+			"problemMatcher": []
+		},
+		{
+			// Not covered by actionlint at all: standalone scripts are not
+			// workflow `run:` blocks, so nothing else here checks them. That
+			// gap was not hypothetical - a broken shellcheck directive in
+			// setup.sh was found only by running this.
+			//
+			// -x follows sourced files, and --source-path=SCRIPTDIR resolves
+			// `# shellcheck source=` directives relative to the SCRIPT rather
+			// than the working directory. Same flags as CI.
+			//
+			// Discovered with `find` rather than `git ls-files`, which is what
+			// CI uses. Deliberate: locally you want a script checked while you
+			// are still writing it, before it has ever been staged.
+			"label": "Shellcheck scripts",
+			"type": "shell",
+			"command": "find . -name '*.sh' -not -path './node_modules/*' -print0 | xargs -0 -r shellcheck -x --source-path=SCRIPTDIR -f gcc",
+			"problemMatcher": []
+		},
+		{
+			// Extracts the shell from .github/workflows/deploy.yml and runs it
+			// against known-good and known-bad configurations. The only check
+			// here that tests BEHAVIOR rather than form, and the only one that
+			// needs nothing the container installs - bash, awk and git are
+			// enough, so it runs outside the container too.
+			"label": "Run tests",
+			"type": "shell",
+			"command": "bash tests/run.sh",
+			"problemMatcher": []
+		},
+		{
+			// Everything, in order. Ctrl+Shift+B.
+			//
+			// dependsOrder is "sequence" rather than the default parallel so the
+			// output stays readable: four checks interleaving into one terminal
+			// is hard to attribute.
+			"label": "Validate all",
+			"dependsOrder": "sequence",
+			"dependsOn": [
+				"Validate workflows and examples",
+				"Check README matches examples",
+				"Shellcheck scripts",
+				"Run tests"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": []
+		}
+	]
+}

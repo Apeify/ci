@@ -1,0 +1,44 @@
+{
+  // Dev container for this repo. Its whole purpose is to let the workflow
+  // checks run LOCALLY, exactly as CI runs them - because this repo cannot
+  // deploy anything by itself, so without it the first place a broken change
+  // gets exercised is a real site's pipeline.
+  //
+  // Installs shellcheck and the same pinned actionlint that CI uses, plus Node
+  // for the YAML/shell extractor in validate.yml.
+  "name": "Apeify CI workflows",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    // Node is needed only by validate.yml's extractor step, which parses the
+    // workflows with js-yaml. Nothing else here uses it.
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "github.vscode-github-actions",
+        "timonwong.shellcheck",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        // Give the shellcheck extension the same flags the CI step and the
+        // "Shellcheck scripts" task use, so the editor, the task, and CI
+        // all report identically. Without them the extension would flag SC1091
+        // on setup.sh - a finding that is already resolved everywhere else.
+        //
+        //   -x                       follow sourced files
+        //   --source-path=SCRIPTDIR  resolve `# shellcheck source=` directives
+        //                            relative to the script rather than the
+        //                            working directory
+        //
+        // This gives live diagnostics in the Problems panel as you edit, which
+        // is why the tasks deliberately define no problemMatcher: the extension
+        // covers that continuously, rather than only when a task is run.
+        "shellcheck.customArgs": ["-x", "--source-path=SCRIPTDIR"]
+      }
+    }
+  }
+}

@@ -1,0 +1,175 @@
+name: Publish to production
+
+# Reusable publish workflow: fast-forwards `main` to `staging`, then starts the
+# production deploy. The calling repo exposes it as a button on its own Actions
+# tab. See README.md.
+#
+# THIS WORKFLOW HAS NO TRIGGERS OF ITS OWN.
+#
+# `workflow_call` is the only entry point. The `workflow_dispatch` that puts the
+# "Run workflow" button on screen lives in the calling repo's stub, which is
+# also where the button's name comes from - so centralizing this is invisible to
+# whoever presses it.
+#
+# WHY A BUTTON RATHER THAN A PULL REQUEST
+#
+# Publishing by merging a `staging` -> `main` pull request has two problems:
+#   * A PR merge creates a MERGE COMMIT on main, so main gains a commit that
+#     staging does not have, and the two drift apart a little with every
+#     publish. Enough drift and a fast-forward becomes impossible, which takes a
+#     manual repair to undo.
+#   * If "Automatically delete head branches" is ever switched on, merging that
+#     PR DELETES `staging` - staging is the pull request's head branch, and that
+#     setting deletes head branches on merge.
+#
+# A fast-forward has neither problem. It only moves main's pointer to staging's
+# commit; it creates nothing. After every publish the two branches are
+# identical rather than merely close.
+#
+# WHY THIS ALSO STANDS IN FOR AN APPROVAL GATE
+#
+# Environment "required reviewers" need a paid plan on a private repository, so
+# these repos have no approval step before a production deploy. Instead, the
+# calling repo's deploy stub omits `main` from its push trigger, so no push can
+# deploy production by accident. Clicking "Run workflow" IS the deliberate act
+# that approving a deployment would have been.
+#
+# That is a guard against ACCIDENT, not exclusivity, and an earlier version of
+# this comment overstated it. The deploy stub must keep workflow_dispatch -
+# this workflow reaches it by dispatching it - so a person with write access
+# can run the deploy manually against `main`. deploy.yml closes that path
+# itself by refusing a production deploy unless the commit it is deploying is
+# already contained in `staging` - the same invariant enforced below, checked
+# against the deployed commit there rather than the branch tip.
+#
+# PERMISSIONS ARE GRANTED BY THE CALLER
+#
+# The `permissions:` block below can only DOWNGRADE the token this workflow is
+# handed; a called workflow cannot elevate. So the calling job must grant
+# `contents: write` and `actions: write` itself - see examples/workflows/promote.yml.
+# That keeps write scoped to one job rather than flipping the whole repository
+# to "Read and write permissions".
+
+on:
+  workflow_call:
+    inputs:
+      deploy-workflow:
+        description: >-
+          Filename of the deploy workflow to dispatch in the calling repo, as it
+          appears in .github/workflows/.
+        type: string
+        default: 'deploy.yml'
+
+permissions:
+  contents: write # fast-forward and push `main`
+  actions: write # dispatch the deploy workflow
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: a shallow clone cannot prove a fast-forward is legal.
+          fetch-depth: 0
+
+      # Refuse to publish unless `main` is an ANCESTOR of `staging`.
+      #
+      # `git merge --ff-only` alone is not enough, and this is worth spelling
+      # out because it very much looks like it should be. --ff-only catches the
+      # case where the two branches have DIVERGED, but not the case where main
+      # is simply AHEAD of staging - someone having committed straight to main.
+      # In that case staging is already an ancestor of main, so the merge
+      # reports "Already up to date", succeeds, and the workflow goes on to
+      # deploy a main carrying commits that were never on staging and were never
+      # seen on the staging site. That is the most dangerous thing this workflow
+      # could do, and without this check it does it while exiting 0.
+      #
+      # Found by testing the drift case against a real remote, not by reading
+      # the code. Do not remove it on the grounds that --ff-only covers it.
+      #
+      # A red X here means "someone committed straight to main; a human needs to
+      # look", which is the correct outcome rather than a bug in this workflow.
+      #
+      # No git identity is configured, deliberately: a fast-forward writes no
+      # commit object, so there is no author to record. If this step ever starts
+      # demanding one, something is creating a merge and the guard has been
+      # defeated - investigate rather than adding a git config line.
+      - name: Fast-forward main to staging
+        shell: bash
+        run: |
+          # Name both refspecs explicitly. actions/checkout configures the remote
+          # to fetch only the ref it checked out, so a bare `git fetch` is not
+          # guaranteed to give us origin/main AND origin/staging.
+          git fetch --prune --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/staging:refs/remotes/origin/staging
+
+          if ! git merge-base --is-ancestor origin/main origin/staging; then
+            echo "::error::main has commit(s) that staging does not - refusing to publish."
+            echo ""
+            echo "Someone committed to main directly. These commits are on main but not staging:"
+            git log --oneline origin/staging..origin/main
+            echo ""
+            echo "To fix, merge main back into staging so the two line up again, then"
+            echo "publish once more. Run this locally:"
+            echo ""
+            echo "    git fetch origin"
+            echo "    git switch staging"
+            echo "    git merge origin/main       # brings the stray commits onto staging"
+            echo "    git push origin staging     # deploys to staging so you can check it"
+            echo ""
+            echo "Confirm the staging site still looks right, then click Run workflow again."
+            echo ""
+            echo "That merge is safe even when main and staging hold identical content -"
+            echo "it just records that main is now an ancestor of staging, which is what"
+            echo "this check needs. Do NOT force-push either branch to resolve this."
+            exit 1
+          fi
+
+          git checkout -B main origin/main
+
+          before=$(git rev-parse HEAD)
+          git merge --ff-only origin/staging
+          after=$(git rev-parse HEAD)
+
+          if [ "$before" = "$after" ]; then
+            echo "main already matched staging - publishing the current content again."
+          else
+            echo "main ${before} -> ${after}"
+            git push origin main
+          fi
+
+      # The push above uses GITHUB_TOKEN, and GitHub deliberately does NOT fire
+      # `on: push` workflows for GITHUB_TOKEN pushes - that is its guard against
+      # runaway recursion. workflow_dispatch is the documented exception (those
+      # always create a run), so the deploy has to be requested explicitly here.
+      # Without this step the publish would move main and deploy nothing at all,
+      # silently.
+      #
+      # Note this dispatches a workflow in the CALLING repo, not in this one.
+      # deploy-workflow reaches the shell through `env:`, like every other
+      # caller-supplied value. It is a workflow_call input, so it is set by the
+      # stub in the consuming repo rather than by a stranger - but that is an
+      # argument about who can reach it, not about whether interpolating it is
+      # sound, and this job holds `contents: write` and `actions: write`. The
+      # same rule deploy.yml states applies here.
+      - name: Deploy to production
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy-workflow }}
+        run: gh workflow run "$DEPLOY_WORKFLOW" --ref main
+
+      - name: Where to look next
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy-workflow }}
+        run: |
+          echo "The production deploy has been started as a SEPARATE Actions run."
+          echo "This run going green only means main was published, not that the"
+          echo "site is live yet. Watch the deploy here:"
+          echo "  ${SERVER_URL}/${REPOSITORY}/actions/workflows/${DEPLOY_WORKFLOW}"
+          echo ""
+          echo "Pipeline:     ${{ job.workflow_ref }}"
+          echo "Pipeline SHA: ${{ job.workflow_sha }}"

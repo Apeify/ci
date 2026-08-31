@@ -1,0 +1,43 @@
+# actionlint configuration.
+#
+# THE ONLY ENTRY HERE IS A SUPPRESSION FOR A STALE LINTER DEFINITION.
+#
+# actionlint's built-in type for the `job` context is missing four properties
+# that GitHub documents and supports:
+#
+#     job.workflow_ref, job.workflow_sha, job.workflow_repository,
+#     job.workflow_file_path
+#
+# Its `job` type currently knows only check_run_id, container, services and
+# status, so `${{ job.workflow_sha }}` is reported as an undefined property.
+# That is actionlint being out of date, not a mistake in the workflows:
+#
+#   "job.workflow_ref - The full ref of the workflow file that defines the
+#    current job. [...] For jobs defined in a reusable workflow, this refers to
+#    the reusable workflow file."
+#   -- https://docs.github.com/en/actions/reference/workflows-and-actions/contexts
+#
+# WHY THE WORKFLOWS USE IT ANYWAY
+#
+# deploy.yml and promote.yml log which version of the shared pipeline actually
+# ran. `job.workflow_*` is the only thing that answers that honestly: for a job
+# running via workflow_call it describes the CALLED reusable workflow, whereas
+# `github.workflow_*` describes the calling workflow in the site repo. A
+# hand-maintained version string or the `# v1.2.0` comment beside a consumer's
+# `uses:` can drift; this cannot.
+#
+# WHY THE PATTERN IS NARROW
+#
+# It is anchored to the job context's object type (the message quotes it,
+# starting with `{check_run_id:`), so it suppresses only this specific
+# stale-definition error. A genuine typo against any other context still fails,
+# and so does a typo against a different `job` property.
+#
+# REMOVE THIS once actionlint's job context includes the workflow_* properties.
+# The check to run after upgrading: delete this file, run actionlint, and see
+# whether it stays quiet.
+
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'property "workflow_(ref|sha|repository|file_path)" is not defined in object type \{check_run_id:'
