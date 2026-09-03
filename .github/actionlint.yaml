@@ -19,7 +19,7 @@
 #
 # WHY THE WORKFLOWS USE IT ANYWAY
 #
-# deploy.yml and promote.yml log which version of the shared pipeline actually
+# promote.yml logs which version of the shared pipeline actually
 # ran. `job.workflow_*` is the only thing that answers that honestly: for a job
 # running via workflow_call it describes the CALLED reusable workflow, whereas
 # `github.workflow_*` describes the calling workflow in the site repo. A

@@ -20,16 +20,45 @@ The consuming project ...
   releasing to production, as opposed to a Pull Request (PR) process (a PR process can still be
   used for landing changes into `staging` if desired).
 
-## Available Workflows
+## What this repo ships
 
-| Workflow | What it does |
-|---|---|
-| [`deploy.yml`](.github/workflows/deploy.yml) | Lints, tests, minifies assets, and rsyncs the site to one or more web roots over SSH |
-| [`promote.yml`](.github/workflows/promote.yml) | The publish button: fast-forwards `main` to `staging`, then starts the production deploy |
+| Piece | Kind | What it does |
+|---|---|---|
+| [`lint-and-test.yml`](.github/workflows/lint-and-test.yml) | reusable workflow | Syntax-checks PHP, installs dev dependencies, runs whichever test suite the repo has, and resolves which environment the deploy targets |
+| [`actions/deploy`](actions/deploy/) | composite action | Validates the target layout, restores mtimes, minifies assets, and rsyncs the site to one or more web roots over SSH |
+| [`promote.yml`](.github/workflows/promote.yml) | reusable workflow | The publish button: fast-forwards `main` to `staging`, then starts the production deploy |
 
-Neither has a trigger of its own. `workflow_call` is their only entry point, so
-pushing to this repository never runs them and no "Run workflow" button appears
-here. Every real trigger lives in the consuming repo, which is where branch
+### Why one of each
+
+**This is the part to understand before copying anything**, because the split is
+load-bearing in both directions and the two halves are not interchangeable.
+
+**`actions/deploy` is an action because only a normal job can enter an
+environment.** The deploy credentials are environment secrets. A job that calls a
+reusable workflow cannot declare `environment:`, so a called workflow can only be
+handed secrets the caller could already see - and `secrets: inherit`, the one
+channel that carries environment secrets across a call, works **only within a
+single organization or enterprise**. A consumer in a different account inherits
+nothing, silently: the environment is still entered, `vars` still resolve, and
+every secret arrives empty. As an action, the deploy runs inside your own job,
+which declares the environment itself, so nothing crosses a boundary and it
+behaves identically whoever owns the repo.
+
+**`lint-and-test.yml` is a workflow because tests must not share a runner with
+the deploy key.** A Composer install executes arbitrary package scripts, and a
+job shares one working directory with everything after it - code running during
+dependency installation could tamper with `public/` and the deploy would
+faithfully rsync the result. GitHub forbids `steps:` on a job that calls a
+reusable workflow, so a consumer cannot fold the two into one job even by
+accident. That refusal is the isolation guarantee, and it is why converting this
+half to an action "for symmetry" would quietly destroy it.
+
+So: **anything needing an environment must be an action; anything needing its own
+VM must be a workflow.** This pipeline needs both, so it ships both.
+
+Neither workflow has a trigger of its own. `workflow_call` is their only entry
+point, so pushing to this repository never runs them and no "Run workflow" button
+appears here. Every real trigger lives in the consuming repo, which is where branch
 policy belongs.
 
 A third workflow, [`validate.yml`](.github/workflows/validate.yml), *does* have
@@ -66,8 +95,8 @@ account should never happen by accident, and the usual guard - an environment
 It is not exclusivity on its own. The deploy stub has to keep
 `workflow_dispatch`, because `promote.yml` reaches it by dispatching it, so
 someone with write access can run the deploy manually against `main` and skip
-the publish button. So `deploy.yml` enforces the same invariant `promote.yml`
-does: **a production deploy is refused unless the commit being deployed is
+the publish button. So the deploy action enforces the same invariant
+`promote.yml` does: **a production deploy is refused unless the commit being deployed is
 already contained in `staging`**. After a publish it is the tip of both; if
 staging has moved on since, it is merely behind, which still passes. Only a
 commit pushed straight to `main` fails it.
@@ -96,14 +125,16 @@ is not a workflow and does not live with them.
 **The stubs are real files in this repo, ready to copy:
 [`examples/workflows/`](examples/workflows/).** That directory mirrors where the
 files go: everything in it belongs in your site repo's `.github/workflows/`, so
-copy `deploy.yml` and `promote.yml` across keeping the same filenames.
+copy `deploy.yml` and `promote.yml` across keeping the same filenames. Each
+stub is two jobs - see [Why one of each](#why-one-of-each) for what the split
+buys you.
 [`examples/dependabot.yml`](examples/dependabot.yml) sits one level up because it
 belongs one level up, at `.github/dependabot.yml`. The blocks below are the same
 files, reproduced here for reading - a check in
 [`validate.yml`](.github/workflows/validate.yml) fails the build if the two ever
 disagree, so what you see here is always what is in `examples/`.
 
-### `.github/workflows/deploy.yml`
+### The deploy stub
 
 [`examples/workflows/deploy.yml`](examples/workflows/deploy.yml)
 
@@ -111,6 +142,24 @@ disagree, so what you see here is always what is in `examples/`.
 ```yaml
 # Thin stub. The pipeline itself lives in Apeify/ci - see
 # https://github.com/Apeify/ci#readme for the full contract and the reasoning.
+#
+# =========================================================================
+# WHY TWO JOBS
+# =========================================================================
+#
+# Not stylistic. The two halves use different mechanisms on purpose.
+#
+# lint-and-test is a reusable WORKFLOW, so it is always its own job on its own
+# VM. Tests run third-party code - a Composer install executes arbitrary package
+# scripts - and a job shares one runner and one working directory with
+# everything after it. GitHub forbids `steps:` on a job that calls a workflow,
+# so this cannot be folded into the deploy job even by accident.
+#
+# deploy is an ACTION, so it runs inside a job you control - which means THIS
+# job can declare `environment:`, and the environment's secrets are read right
+# here rather than passed across a repository boundary. That is what makes the
+# pipeline work when this repo and Apeify/ci have different owners:
+# `secrets: inherit` only carries secrets within one organization.
 #
 # =========================================================================
 # WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
@@ -121,65 +170,76 @@ disagree, so what you see here is always what is in `examples/`.
 #   production   deployed ONLY by promote.yml, and only from `main`
 #   staging      deployed automatically on every push to `staging`
 #
-# Those names are not arbitrary. The shared workflow maps `main` to
-# `production` and every other ref to `staging`. A third target - a Disaster
-# Recovery host, a preview account - needs its own environment and the
-# `environment:` input; see deploy-dr.yml.
+# Those names are not arbitrary: lint-and-test.yml maps `main` to `production`
+# and every other ref to `staging`, and publishes the result as an output. A
+# third target - a Disaster Recovery host, a preview account - needs its own
+# environment; see deploy-dr.yml.
 #
 # SECRETS, set on EACH environment (they hold different values per account):
 #
 #   DEPLOY_SSH_KEY   required  Unencrypted OpenSSH private key authorized on
-#                              that host. A PuTTY .ppk will NOT work; export
-#                              to OpenSSH format first.
+#                              that host. A PuTTY .ppk will NOT work; export to
+#                              OpenSSH format first.
 #   DEPLOY_HOST      required  SSH hostname.
 #   DEPLOY_USER      required  SSH username.
 #   DEPLOY_BASE_DIR  required  Absolute path to the directory CONTAINING the
-#                              web root(s) - on shared hosting usually the
-#                              account home, e.g. /home/username.
+#                              web root(s) - usually the account home.
 #   DEPLOY_PORT      optional  SSH port. Defaults to 22.
-#   DEPLOY_HOST_KEY  optional  The host's known_hosts line(s), pasted whole.
-#                              Not a fingerprint - SSH needs the key itself.
-#                              Prefer a value your host PUBLISHES; failing
-#                              that, `ssh-keyscan your-host` (no -H, and keep
-#                              every key line it prints, not just the first).
-#                              Recommended: with it unset the deploy trusts
-#                              whatever key the server presents, on every run.
-#                              See the README's Host key pinning section.
+#   DEPLOY_HOST_KEY  optional  The host's known_hosts line(s), pasted whole -
+#                              not a fingerprint. Prefer a value your host
+#                              publishes. See the README's Host key pinning
+#                              section.
 #
 # VARIABLES, set on EACH environment:
 #
 #   WEB_ROOT_DIRS    required  Web-root directory NAMES, ONE PER LINE, each
-#                              relative to DEPLOY_BASE_DIR. Usually one. List
-#                              more only if the app is built to serve several
-#                              hostnames from a single ACCOUNT: they sit side
-#                              by side under DEPLOY_BASE_DIR, receive the same
-#                              commit, and therefore share one app directory
-#                              and one set of runtime state.
-#   SITE_URL         optional  Public URL of this environment's site. Used
-#                              only for the link GitHub shows on the
-#                              deployment; unset just means no link.
+#                              relative to DEPLOY_BASE_DIR.
+#   SITE_URL         optional  Public URL of this environment's site.
 #
 # PERMISSIONS: nothing to do for this stub. The deploy only reads the repo.
-# promote.yml is the one that needs write, and it grants that on its own job -
-# see that stub.
+# promote.yml is the one that needs write, and grants it on its own job.
 #
-# INPUTS this stub may pass under `with:`. All are optional. Their default
-# VALUES are declared in the shared workflow and deliberately not restated
-# here - a copy in this file would go stale the day one of them changes. See
-# the README, or the input descriptions in the shared deploy.yml itself.
+# INPUTS this stub may pass under `with:`. Their default VALUES are declared in
+# the shared pipeline and deliberately not restated here - a copy in this file
+# would go stale the day one of them changes. See the README's Inputs tables.
+#
+# NOTE THERE ARE TWO `with:` BLOCKS, one per job, and they take different
+# inputs. Putting one under the wrong job fails the run before it starts, with
+# "Invalid input, ... is not defined in the referenced workflow".
+#
+# On the `lint-and-test` job:
 #
 #   php-version      PHP version used for lint and tests.
+#   environment      Override which environment the deploy targets. Normally
+#                    derived from the branch; see deploy-dr.yml.
+#
+# On the `deploy` job's `uses: Apeify/ci/actions/deploy` step. The first three
+# have no usable default and the deploy refuses without them:
+#
+#   environment      REQUIRED. Pass needs.lint-and-test.outputs.environment.
+#                    This drives the production refusals, so an empty value is
+#                    refused rather than defaulted to something safe-looking.
+#   attestation      REQUIRED. Pass needs.lint-and-test.outputs.attestation.
+#   web-root-dirs    REQUIRED. Pass ${{ vars.WEB_ROOT_DIRS }}. It is an input
+#                    rather than read from the environment because `vars` is
+#                    unreadable inside a composite action.
+#   ssh-key, host,   The credentials, from that environment's secrets. Passed
+#   user, base-dir   explicitly for the same reason: an action reads no
+#                    `secrets` context of its own. The preflight names all of
+#                    them at once when any are missing.
+#   port, host-key   Optional. See the README's Host key pinning section.
+#   site-url         Logging only. The clickable link on the deployment comes
+#                    from this job's `environment.url`.
 #   public-dir       Repo directory whose CONTENTS are deployed to each web
 #                    root. Conventionally `public`.
 #   app-dir          Repo directory kept OUT of the web root. Conventionally
 #                    `app`.
 #   app-remote-dir   Name that directory takes ON THE SERVER. Set it only when
 #                    the server expects something other than app-dir.
-#   deploy-app-dir   Set false if the site has no private directory at all -
+#   deploy-app-dir   Set 'false' if the site has no private directory at all -
 #                    everything lives under the web root. The app-* inputs
-#                    above are then ignored entirely.
-#   environment      Override which environment is deployed to. Normally
-#                    derived from the branch; see deploy-dr.yml.
+#                    above are then ignored entirely. A STRING, not a boolean:
+#                    composite action inputs always are.
 #   public-excludes  rsync excludes for public-dir, ONE PER LINE. Supplying
 #                    this REPLACES the default list rather than adding to it,
 #                    so include anything from it you still need. .git and
@@ -196,49 +256,64 @@ on:
     # nothing - that is what stops a stray commit reaching the live site by
     # accident.
     #
-    # It is NOT the whole story, and an earlier version of this comment claimed
-    # it was. workflow_dispatch below cannot be removed (promote.yml reaches
-    # this workflow by dispatching it), so anyone with write access can run
-    # this manually against `main`. The shared workflow closes that path
-    # itself: a production deploy is refused unless the commit being
-    # deployed is already contained in `staging`, which is the invariant
-    # promote.yml enforces before it fast-forwards.
+    # It is NOT the whole story. workflow_dispatch below cannot be removed
+    # (promote.yml reaches this workflow by dispatching it), so anyone with
+    # write access can run this manually against `main`. The pipeline closes
+    # that path itself: a production deploy is refused unless the commit being
+    # deployed is already contained in `staging`.
     branches: [staging]
   workflow_dispatch:
 
 concurrency:
-  # One in-flight deploy per branch, and NEVER cancel one that is already
-  # running - on either branch.
-  #
-  # rsync defaults to --delete-during, so deletions interleave with the
-  # transfer. Killing a deploy partway leaves that web root half-deleted and
-  # half-updated. The next successful deploy repairs it, but that repair is
-  # conditional: if the run that did the canceling then fails - a bad commit,
-  # an SSH hiccup, a guard refusing it - the tree stays torn.
-  #
-  # Queueing instead means the in-flight deploy finishes and the tree is at
-  # least consistent at SOME commit before the next one starts.
-  #
-  # This applies to staging as much as production. The stakes differ, but the
-  # damage does not, and a half-deployed preview is actively misleading: the
-  # whole point of staging is judging whether a change is good, and a torn tree
-  # shows breakage that is not in the change.
-  #
-  # The cost is real but small: several rapid pushes deploy in sequence rather
-  # than collapsing into one, spending a few extra runner minutes. Cheaper than
-  # a preview nobody can trust.
+  # One in-flight deploy per branch, and NEVER cancel one already running.
+  # rsync deletes during the transfer, so a killed deploy leaves a web root
+  # half-updated, and the repair only happens if the run that canceled it then
+  # succeeds. Queueing keeps the tree consistent at SOME commit.
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  lint-and-test:
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
+
   deploy:
-    uses: Apeify/ci/.github/workflows/deploy.yml@main
-    # `inherit` rather than an explicit secrets map, and this is forced rather
-    # than lazy: the deploy credentials are ENVIRONMENT secrets, and a job that
-    # uses `uses:` cannot declare `environment:`. An explicit map would be
-    # evaluated here, in a context that never entered an environment, and would
-    # silently pass empty strings.
-    secrets: inherit
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      # Both this and the action's `environment:` input come from the same job
+      # output, so the branch mapping is stated once, in the shared pipeline,
+      # rather than written twice here where the copies could drift.
+      name: ${{ needs.lint-and-test.outputs.environment }}
+      url: ${{ vars.SITE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so the mtime restore can date every file.
+          fetch-depth: 0
+
+      - uses: Apeify/ci/actions/deploy@main
+        with:
+          environment: ${{ needs.lint-and-test.outputs.environment }}
+          attestation: ${{ needs.lint-and-test.outputs.attestation }}
+          # `vars` is unreadable inside a composite action, so the web roots
+          # are handed over explicitly.
+          web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
+          site-url: ${{ vars.SITE_URL }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ secrets.DEPLOY_HOST }}
+          user: ${{ secrets.DEPLOY_USER }}
+          base-dir: ${{ secrets.DEPLOY_BASE_DIR }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          host-key: ${{ secrets.DEPLOY_HOST_KEY }}
+          # Server-managed state and server-only config: the deploy must never
+          # overwrite these with whatever happens to be in the repo. One pattern
+          # per line - every list here is newline-separated, never
+          # space-separated, so a pattern containing a space still works.
+          app-excludes: |
+            cache/
+            config/mail.php
 ```
 
 ### `.github/workflows/promote.yml`
@@ -330,35 +405,27 @@ Only for a site with a third target - see
 # Thin stub for a Disaster Recovery (DR) target. The pipeline itself lives in
 # Apeify/ci - see https://github.com/Apeify/ci#readme for the full contract.
 #
-# Optional. Only add this if the site has a third deploy target - a standby
-# host, a preview account - that the two-branch mapping cannot express, since
-# one ref maps to exactly one environment.
+# Copy this ALONGSIDE deploy.yml, not instead of it. deploy.yml handles staging
+# and production; this handles one extra environment that neither branch selects.
 #
 # =========================================================================
-# WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
+# WHAT YOU MUST CONFIGURE
 # =========================================================================
 #
-# ENVIRONMENT (Settings -> Environments). Create one named to match the
-# `environment:` input below - `dr` as written here.
+# An ENVIRONMENT named `dr` (or whatever you pass below), holding the same
+# secrets and variables every other environment does: DEPLOY_SSH_KEY,
+# DEPLOY_HOST, DEPLOY_USER, DEPLOY_BASE_DIR (required), DEPLOY_PORT and
+# DEPLOY_HOST_KEY (optional), plus WEB_ROOT_DIRS and SITE_URL.
 #
-# It needs its OWN copy of everything the production environment has, because
-# it is a different host with different credentials:
-#
-#   Secrets    DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_USER, DEPLOY_BASE_DIR
-#              (required), DEPLOY_PORT, DEPLOY_HOST_KEY (optional)
-#   Variables  WEB_ROOT_DIRS (required), SITE_URL (optional)
-#
-# See deploy.yml's header for what each one means.
-#
-# WHY THIS IS A SEPARATE FILE
-#
-# The environment is hardcoded below rather than offered as a run-time choice.
-# Wiring it to a workflow_dispatch input would turn a reviewed,
-# version-controlled decision into a dropdown that includes production.
+# The environment name is passed to lint-and-test.yml, which normally derives it
+# from the branch. Supplying it overrides that derivation - which is the whole
+# point here, since no branch maps to `dr`.
 # =========================================================================
-name: Deploy to DR host
+name: Deploy to DR
 
 on:
+  # Manual only. A DR target exists for the day the primary host is gone, so it
+  # is deployed deliberately rather than on a push.
   workflow_dispatch:
 
 concurrency:
@@ -366,24 +433,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    # DR mirrors production, so hold it to the same branch rule: deploy only
-    # from `main`, which is the branch promote.yml fast-forwards.
-    #
-    # PART of the rule, not all of it. For `production` the shared workflow
-    # applies two checks - the ref must be `main`, AND the commit being deployed
-    # must already be contained in `staging`. It cannot apply either to `dr`,
-    # because it has no way to know that `dr` is production-like, and only the
-    # first is expressible from out here: a caller job may carry `if:` even
-    # though it cannot carry `environment:`, but `if:` cannot inspect git
-    # history. In practice a DR run started from `main` right after a publish
-    # gets the second property anyway, by deploying the commit production
-    # already accepted.
-    if: github.ref == 'refs/heads/main'
-    uses: Apeify/ci/.github/workflows/deploy.yml@main
+  lint-and-test:
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
     with:
       environment: dr
-    secrets: inherit
+
+  deploy:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # DR mirrors production, so hold it to the same branch rule: deploy only
+    # from `main`, the branch promote.yml fast-forwards.
+    #
+    # PART of the rule, not all of it. For `production` the action applies two
+    # checks - the ref must be `main`, AND the commit must already be contained
+    # in `staging`. It cannot apply either to `dr`, because it has no way to know
+    # that `dr` is production-like, and only the first is expressible out here:
+    # `if:` cannot inspect git history. In practice a DR run started from `main`
+    # right after a publish gets the second property anyway, by deploying the
+    # commit production already accepted.
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: ${{ needs.lint-and-test.outputs.environment }}
+      url: ${{ vars.SITE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: Apeify/ci/actions/deploy@main
+        with:
+          environment: ${{ needs.lint-and-test.outputs.environment }}
+          attestation: ${{ needs.lint-and-test.outputs.attestation }}
+          web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
+          site-url: ${{ vars.SITE_URL }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ secrets.DEPLOY_HOST }}
+          user: ${{ secrets.DEPLOY_USER }}
+          base-dir: ${{ secrets.DEPLOY_BASE_DIR }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          host-key: ${{ secrets.DEPLOY_HOST_KEY }}
+          # MIRROR deploy.yml's inputs here, not just its secrets and variables.
+          # These are stub-level, so nothing carries them over for you, and a DR
+          # deploy missing them runs --delete against server-managed state on
+          # the failover host - the one place it is least recoverable.
+          app-excludes: |
+            cache/
+            config/mail.php
 ```
 
 ## Configuration
@@ -412,14 +509,32 @@ no configuration is shared between site repos.
 
 ### Inputs
 
+The stub has **two** `with:` blocks, one per job, and they take different inputs.
+Putting one under the wrong job fails the run before it starts with "Invalid
+input, ... is not defined in the referenced workflow".
+
+**`lint-and-test.yml`** - on the `lint-and-test` job:
+
 | Input | Default | Meaning |
 |---|---|---|
 | `php-version` | `8.3` | PHP version for lint and tests |
+| `environment` | *(derived from the ref)* | Override which environment the deploy targets. Set it to reach a third target such as Disaster Recovery |
+
+**`actions/deploy`** - on the step inside the `deploy` job. The first four have
+no usable default and the deploy refuses without them:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `environment` | **required** | Pass `needs.lint-and-test.outputs.environment`. Drives the production refusals, so an empty value is refused rather than defaulted |
+| `attestation` | **required** | Pass `needs.lint-and-test.outputs.attestation` |
+| `web-root-dirs` | **required** | Pass `${{ vars.WEB_ROOT_DIRS }}`. An input because `vars` is unreadable inside a composite action |
+| `ssh-key`, `host`, `user`, `base-dir` | *(empty)* | The credentials, from that environment's secrets. Reported together by the preflight when missing |
+| `port`, `host-key` | *(empty)* | Optional; see [Host key pinning](#host-key-pinning) |
+| `site-url` | *(empty)* | Logging only. The clickable link comes from the job's `environment.url` |
 | `public-dir` | `public` | Repo directory whose **contents** go into each web root |
 | `app-dir` | `app` | Repo directory holding code that must not be web-accessible |
 | `app-remote-dir` | *(same as `app-dir`)* | Name that directory takes **on the server** |
-| `environment` | *(derived from the ref)* | GitHub Environment to deploy to. Set it to reach a third target such as Disaster Recovery |
-| `deploy-app-dir` | `true` | Set `false` for a site with no private directory; all `app-*` inputs are then ignored |
+| `deploy-app-dir` | `'true'` | Set `'false'` for a site with no private directory; all `app-*` inputs are then ignored. A string, not a boolean |
 | `public-excludes` | `dev-router.php`, `router.php`, `.well-known` | rsync excludes for the public directory, **one per line**. Supplying this **replaces** the default |
 | `app-excludes` | *(empty)* | rsync excludes for the app directory, **one per line**. Use for server-managed state or server-only config |
 
@@ -506,7 +621,7 @@ with:
 `app-dir`, `app-remote-dir`, and `app-excludes` are then ignored, no app sync
 runs, and the layout check stops requiring that directory.
 
-It is a typed boolean rather than "pass an empty `app-dir`" on purpose. Empty is
+It is a string rather than "pass an empty `app-dir`" on purpose. Empty is
 the signature of the misconfiguration that collapses an rsync destination onto
 `DEPLOY_BASE_DIR` and empties the account, so empty has to stay fatal
 *everywhere* rather than meaning "skip" in one place. It also matters that
@@ -585,6 +700,22 @@ with:
     cache/
     config/mail.php
 ```
+
+### Cross-owner consumers are supported
+
+You do not need to be in the same organization as this repository, and that is
+the main reason the deploy half is an action rather than a workflow.
+
+An earlier version was a single reusable workflow that took its credentials by
+`secrets: inherit`. GitHub honors that only within one organization or
+enterprise, so a site repo under a different account inherited nothing - and did
+so silently, because the environment was still entered and `vars` still
+resolved. Only the secrets arrived empty, which surfaced as the preflight
+reporting credentials missing from an environment where they plainly existed.
+
+Because the deploy is now an action running inside your own job, the environment
+secrets are read in your repository and never cross a call boundary. Nothing
+about ownership matters.
 
 ### Repository settings
 
@@ -762,7 +893,8 @@ For production sites, pin by **commit SHA** with a version comment, the same way
 actions are pinned:
 
 ```yaml
-uses: Apeify/ci/.github/workflows/deploy.yml@a1b2c3d # v1.2.0
+uses: Apeify/ci/.github/workflows/lint-and-test.yml@a1b2c3d # v1.2.0
+uses: Apeify/ci/actions/deploy@a1b2c3d                      # v1.2.0
 ```
 
 A moving `@v1` tag is the other common convention, but it is a mutable ref: one
@@ -814,7 +946,8 @@ is a different directory for a different thing.
 # The deploy and promote stubs pin the shared pipeline to a commit SHA with a
 # version comment beside it:
 #
-#   uses: Apeify/ci/.github/workflows/deploy.yml@<sha>  # v1.4.0
+#   uses: Apeify/ci/actions/deploy@<sha>                   # v1.4.0
+#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v1.4.0
 #
 # A pin is what stops a change in the shared repo from reaching this site
 # without anyone deciding it should. The cost is that the pin then has to be

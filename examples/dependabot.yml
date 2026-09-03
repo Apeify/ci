@@ -12,7 +12,8 @@
 # The deploy and promote stubs pin the shared pipeline to a commit SHA with a
 # version comment beside it:
 #
-#   uses: Apeify/ci/.github/workflows/deploy.yml@<sha>  # v1.4.0
+#   uses: Apeify/ci/actions/deploy@<sha>                   # v1.4.0
+#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v1.4.0
 #
 # A pin is what stops a change in the shared repo from reaching this site
 # without anyone deciding it should. The cost is that the pin then has to be

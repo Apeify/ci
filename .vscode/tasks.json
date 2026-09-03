@@ -4,8 +4,12 @@
 	// These run inside the dev container, which provisions actionlint and
 	// shellcheck (see .devcontainer/). Outside it, they will not resolve.
 	//
-	// Together they cover the same ground as CI (.github/workflows/validate.yml)
-	// so a change can be checked before pushing. Where CI and a task run the
+	// These cover four of CI's five layers. The one they do NOT cover is
+	// validate.yml's extractor - the js-yaml parse, the runs.using check and
+	// the missing-shell check - which needs Node and js-yaml. That is also the
+	// ONLY automated schema check the composite action gets, since actionlint
+	// cannot read one, so push-and-watch remains the way to catch a malformed
+	// action.yml. Where CI and a task run the
 	// same non-trivial logic, that logic lives in scripts/ and both call it -
 	// duplicating it here would reintroduce the drift these checks exist to
 	// catch.
@@ -66,7 +70,7 @@
 			"problemMatcher": []
 		},
 		{
-			// Extracts the shell from .github/workflows/deploy.yml and runs it
+			// Extracts the shell from actions/deploy/action.yml and runs it
 			// against known-good and known-bad configurations. The only check
 			// here that tests BEHAVIOR rather than form, and the only one that
 			// needs nothing the container installs - bash, awk and git are

@@ -1,35 +1,27 @@
 # Thin stub for a Disaster Recovery (DR) target. The pipeline itself lives in
 # Apeify/ci - see https://github.com/Apeify/ci#readme for the full contract.
 #
-# Optional. Only add this if the site has a third deploy target - a standby
-# host, a preview account - that the two-branch mapping cannot express, since
-# one ref maps to exactly one environment.
+# Copy this ALONGSIDE deploy.yml, not instead of it. deploy.yml handles staging
+# and production; this handles one extra environment that neither branch selects.
 #
 # =========================================================================
-# WHAT YOU MUST CONFIGURE BEFORE THIS WORKS
+# WHAT YOU MUST CONFIGURE
 # =========================================================================
 #
-# ENVIRONMENT (Settings -> Environments). Create one named to match the
-# `environment:` input below - `dr` as written here.
+# An ENVIRONMENT named `dr` (or whatever you pass below), holding the same
+# secrets and variables every other environment does: DEPLOY_SSH_KEY,
+# DEPLOY_HOST, DEPLOY_USER, DEPLOY_BASE_DIR (required), DEPLOY_PORT and
+# DEPLOY_HOST_KEY (optional), plus WEB_ROOT_DIRS and SITE_URL.
 #
-# It needs its OWN copy of everything the production environment has, because
-# it is a different host with different credentials:
-#
-#   Secrets    DEPLOY_SSH_KEY, DEPLOY_HOST, DEPLOY_USER, DEPLOY_BASE_DIR
-#              (required), DEPLOY_PORT, DEPLOY_HOST_KEY (optional)
-#   Variables  WEB_ROOT_DIRS (required), SITE_URL (optional)
-#
-# See deploy.yml's header for what each one means.
-#
-# WHY THIS IS A SEPARATE FILE
-#
-# The environment is hardcoded below rather than offered as a run-time choice.
-# Wiring it to a workflow_dispatch input would turn a reviewed,
-# version-controlled decision into a dropdown that includes production.
+# The environment name is passed to lint-and-test.yml, which normally derives it
+# from the branch. Supplying it overrides that derivation - which is the whole
+# point here, since no branch maps to `dr`.
 # =========================================================================
-name: Deploy to DR host
+name: Deploy to DR
 
 on:
+  # Manual only. A DR target exists for the day the primary host is gone, so it
+  # is deployed deliberately rather than on a push.
   workflow_dispatch:
 
 concurrency:
@@ -37,21 +29,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    # DR mirrors production, so hold it to the same branch rule: deploy only
-    # from `main`, which is the branch promote.yml fast-forwards.
-    #
-    # PART of the rule, not all of it. For `production` the shared workflow
-    # applies two checks - the ref must be `main`, AND the commit being deployed
-    # must already be contained in `staging`. It cannot apply either to `dr`,
-    # because it has no way to know that `dr` is production-like, and only the
-    # first is expressible from out here: a caller job may carry `if:` even
-    # though it cannot carry `environment:`, but `if:` cannot inspect git
-    # history. In practice a DR run started from `main` right after a publish
-    # gets the second property anyway, by deploying the commit production
-    # already accepted.
-    if: github.ref == 'refs/heads/main'
-    uses: Apeify/ci/.github/workflows/deploy.yml@main
+  lint-and-test:
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
     with:
       environment: dr
-    secrets: inherit
+
+  deploy:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # DR mirrors production, so hold it to the same branch rule: deploy only
+    # from `main`, the branch promote.yml fast-forwards.
+    #
+    # PART of the rule, not all of it. For `production` the action applies two
+    # checks - the ref must be `main`, AND the commit must already be contained
+    # in `staging`. It cannot apply either to `dr`, because it has no way to know
+    # that `dr` is production-like, and only the first is expressible out here:
+    # `if:` cannot inspect git history. In practice a DR run started from `main`
+    # right after a publish gets the second property anyway, by deploying the
+    # commit production already accepted.
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: ${{ needs.lint-and-test.outputs.environment }}
+      url: ${{ vars.SITE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: Apeify/ci/actions/deploy@main
+        with:
+          environment: ${{ needs.lint-and-test.outputs.environment }}
+          attestation: ${{ needs.lint-and-test.outputs.attestation }}
+          web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
+          site-url: ${{ vars.SITE_URL }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ secrets.DEPLOY_HOST }}
+          user: ${{ secrets.DEPLOY_USER }}
+          base-dir: ${{ secrets.DEPLOY_BASE_DIR }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          host-key: ${{ secrets.DEPLOY_HOST_KEY }}
+          # MIRROR deploy.yml's inputs here, not just its secrets and variables.
+          # These are stub-level, so nothing carries them over for you, and a DR
+          # deploy missing them runs --delete against server-managed state on
+          # the failover host - the one place it is least recoverable.
+          app-excludes: |
+            cache/
+            config/mail.php

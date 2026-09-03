@@ -43,8 +43,10 @@ judgment, not agreement.
   `actionlint` is pinned by version *and* verified against a SHA256 committed in
   [.actionlint-version](.actionlint-version); `esbuild` is pinned to an exact version. If something
   cannot be pinned, that is an argument against using it.
-- **No secrets live here.** Every credential belongs to the consuming repo's GitHub Environment and
-  arrives via `secrets: inherit`. This repo is public.
+- **No secrets live here.** Every credential belongs to the consuming repo's GitHub Environment.
+  The deploy reads them as action inputs, inside the consumer's own job - NOT via `secrets:
+  inherit`, which carries nothing across an owner boundary and failed silently when it was tried.
+  This repo is public.
 - **The workflows must stay `workflow_call`-only.** They carry no triggers of their own; adding one
   would make them run here, where there is no site and no credentials.
 
@@ -61,14 +63,15 @@ four check tasks defined in [.vscode/tasks.json](.vscode/tasks.json) (the fifth 
 bash scripts/lint-workflows.sh                      # schema, expressions, embedded shell
 bash scripts/check-readme-examples.sh               # README blocks match examples/
 shellcheck -x --source-path=SCRIPTDIR <every *.sh>  # standalone scripts
-bash tests/run.sh                                   # behavior of the shell in deploy.yml
+bash tests/run.sh                                   # behavior of the shell in the deploy action
 ```
 
 **The tests run the shipping code, not a copy of it.** [tests/lib/harness.sh](tests/lib/harness.sh)
-extracts a step's `run:` body - or one function - out of `deploy.yml` and executes it, because a
-transcription under `tests/` would keep passing while the workflow was broken. Two consequences
-worth knowing before editing either side: the preflight step is testable only because it takes every
-value from `env:` and contains no `${{ }}` of its own, and a test named `REGRESSION` records a bug
+extracts a step's `run:` body - or one function - out of `actions/deploy/action.yml` and
+executes it, because a transcription under `tests/` would keep passing while the action was
+broken. Two consequences worth knowing before editing either side: the preflight step is testable
+only because it takes every value from `env:` and contains no `${{ }}` of its own, and a test named
+`REGRESSION` records a bug
 that actually shipped. They need only bash, awk and git.
 
 **Local checks cannot test a deploy.** There is no host and no credentials here, so nothing
@@ -81,9 +84,11 @@ process in full.
 
 ```
 .github/workflows/
-  deploy.yml      Reusable. Lint/test job, then a separate deploy job.
-  promote.yml     Reusable. The publish button: fast-forward main, dispatch the deploy.
-  validate.yml    The ONLY workflow with triggers. Lints the other two.
+  lint-and-test.yml  Reusable. Lints, tests, and resolves the target environment.
+  promote.yml        Reusable. The publish button: fast-forward main, dispatch the deploy.
+  validate.yml       The ONLY workflow with triggers. Lints the other two.
+actions/
+  deploy/         Composite action. The rsync half, run inside the CONSUMER's job.
 examples/         Copyable artifacts, laid out to mirror where each goes in a
                   consuming repo.
   workflows/      Belongs in the consumer's .github/workflows/. NOT in this repo's
@@ -93,15 +98,18 @@ examples/         Copyable artifacts, laid out to mirror where each goes in a
                   workflows/ directory only and validate.yml's extractor
                   YAML-parses this one.
 scripts/          Logic shared between CI and the VS Code tasks.
-tests/            Behavior tests. Extract the shell from deploy.yml and run it.
+tests/            Behavior tests. Extract the shell from the deploy action and run it.
 .actionlint-version   Pinned version + checksums, read by CI and the dev container.
 ```
 
 Two properties are load-bearing and easy to break by accident:
 
-- **`deploy.yml` runs lint/test in a separate job with no `environment:`.** Tests may execute
-  third-party code, and a job shares a runner and working directory with everything after it. A
-  separate job is a separate VM whose filesystem the deploy never sees.
+- **The split between a workflow and an action is not stylistic.** The deploy is an action because
+  only a normal job can declare `environment:`, and the credentials are environment secrets - as a
+  reusable workflow it would need `secrets: inherit`, which carries nothing across an owner
+  boundary. `lint-and-test` stays a workflow because a job calling one cannot also declare
+  `steps:`, which is what stops third-party test code sharing a runner with the deploy key.
+  Converting either to match the other silently destroys one of those two properties.
 - **Consumers omit `main` from their push trigger.** That absence substitutes for the
   required-reviewer rule these repos cannot have: pushing to `main` deploys nothing. It is not
   exclusivity, though - the stub must keep `workflow_dispatch`, since that is how `promote.yml`
@@ -123,8 +131,8 @@ Two properties are load-bearing and easy to break by accident:
   from the file, never the reverse.
 - **Comment the reasoning, not the mechanics.** A reader can see *what* a step does. Record why it
   is written that way, especially where the obvious simplification is wrong - the merge-commit trap
-  in the mtime restore, the trailing-slash rule on the app rsync, and why `secrets: inherit` is
-  forced rather than lazy are all examples worth preserving.
+  in the mtime restore, the trailing-slash rule on the app rsync, and why the deploy half is an
+  action while the lint half stays a workflow are all examples worth preserving.
 - **Prefer detection over configuration.** A repo either has `tests/run.php`, or `composer.json`, or
   neither. Asking the caller to declare it adds a second place for the truth to live and a second
   place to get it wrong.

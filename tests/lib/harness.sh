@@ -3,8 +3,15 @@
 #
 # The whole point of these tests is that they exercise the SHIPPING code, not a
 # transcription of it. The shell that matters lives inside `run:` blocks in
-# .github/workflows/deploy.yml, so the harness pulls those blocks back out of
-# the YAML and runs them. A copy of the logic maintained here would pass while
+# actions/deploy/action.yml, so the harness pulls those blocks back out of the
+# YAML and runs them.
+#
+# That file is a composite action rather than a workflow, which matters twice
+# over. Its steps sit two spaces shallower than a job's, which the extractor
+# handles because it strips leading whitespace before matching and takes the
+# body indent from the first content line. And actionlint does not understand
+# composite actions at all - it parses action.yml as a workflow and reports
+# nonsense - so these tests are the ONLY automated check on that shell. A copy of the logic maintained here would pass while
 # the workflow was broken, which is the failure mode the tests exist to prevent.
 #
 # Extraction is done with awk rather than a YAML parser on purpose: these tests
@@ -21,7 +28,7 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TESTS_RUN=0
 TESTS_FAILED=0
 
-# DEPLOY_WORKFLOW and GH_BASH are read by the *.test.sh files that source this
+# DEPLOY_ACTION and GH_BASH are read by the *.test.sh files that source this
 # one, which shellcheck cannot see from here - hence the narrow disable rather
 # than exporting them into the environment of every command the tests run.
 #
@@ -30,7 +37,7 @@ TESTS_FAILED=0
 # different language. `-e` in particular changes what a failing command inside
 # a guard does.
 # shellcheck disable=SC2034
-DEPLOY_WORKFLOW="${REPO_ROOT}/.github/workflows/deploy.yml"
+DEPLOY_ACTION="${REPO_ROOT}/actions/deploy/action.yml"
 # shellcheck disable=SC2034
 GH_BASH=(bash --noprofile --norc -eo pipefail)
 
@@ -67,7 +74,7 @@ extract_run_step() {
 # Pull one shell function definition out of an already-extracted script.
 #
 # $1 file containing shell, $2 function name. Assumes the closing brace sits at
-# the same indentation as the definition, which is true throughout deploy.yml
+# the same indentation as the definition, which is true throughout action.yml
 # and is verified by the `bash -n` check in require_shell below.
 extract_function() {
   local file="$1" fn="$2" out

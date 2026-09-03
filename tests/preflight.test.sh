@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration tests for deploy.yml's preflight step, run as one script the way
+# Integration tests for the deploy action's preflight step, run as one script the way
 # GitHub runs it.
 #
 # path-rules.test.sh covers the helpers in isolation. This file covers how they
@@ -18,7 +18,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 PREFLIGHT="${WORK}/preflight.sh"
-extract_run_step "$DEPLOY_WORKFLOW" "Preflight - check configuration" > "$PREFLIGHT"
+extract_run_step "$DEPLOY_ACTION" "Preflight - check configuration" > "$PREFLIGHT"
 require_shell "$PREFLIGHT" "WEB_ROOT_DIRS"
 
 # A known-good configuration. Each test overrides only what it is about, so a
@@ -50,6 +50,21 @@ assert_exit 0 "a trailing newline in WEB_ROOT_DIRS is ordinary input" \
 assert_exit 0 "several sibling web roots" preflight "WEB_ROOT_DIRS=a.com
 b.com"
 assert_exit 0 "app-remote-dir may differ from app-dir" preflight APP_REMOTE_DIR=private
+
+describe "the environment input must be present"
+# Not a formality. `required: true` on an action input is advisory - the runner
+# does not enforce it - so an omitted or misspelled `environment:` arrives as an
+# empty string, fails the `= "production"` test, and silently disables BOTH
+# production refusals while the caller's job has already entered the
+# environment and put its credentials in scope.
+assert_exit 1 "an empty environment is refused" preflight RESOLVED_ENVIRONMENT=
+assert_output_contains "'environment' input is empty" "the empty input is named" \
+  preflight RESOLVED_ENVIRONMENT=
+assert_exit 1 "a whitespace-only environment is refused" preflight "RESOLVED_ENVIRONMENT=   "
+# The refusal must come BEFORE the production guards, not instead of them: an
+# empty value must never be treated as 'staging' and waved through.
+assert_output_contains "'environment' input is empty" "whitespace is refused the same way" \
+  preflight "RESOLVED_ENVIRONMENT=	"
 
 describe "missing configuration is refused, and named"
 assert_exit 1 "missing SSH key" preflight DEPLOY_SSH_KEY=

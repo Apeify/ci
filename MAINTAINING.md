@@ -28,8 +28,15 @@ affecting anyone until their pin moves.
 ### What "major" means here
 
 A **major** bump is any change requiring the consumer to act: a new required
-input, a renamed secret or variable they must create, a changed server layout.
-Everything else is minor or patch.
+input, a renamed secret or variable they must create, a changed server layout,
+or a change to the SHAPE of the stub - a workflow that moved or was deleted, a
+job that has to be added. Everything else is minor or patch.
+
+That last clause exists because the first release to carry it is one the earlier
+definition did not describe: `deploy.yml` was deleted and every consumer has to
+rewrite a one-job stub into two. A pin bump alone gives them "workflow was not
+found" on their next push. Any release like that needs a migration note saying
+so, not just a version number.
 
 That definition is doing real work, because a consumer pinned to a SHA gets a
 Dependabot PR either way - the version comment beside the pin is the only signal
@@ -68,7 +75,9 @@ your behalf.
 ref to your branch and push that repo's `staging`:
 
 ```yaml
-uses: Apeify/ci/.github/workflows/deploy.yml@my-branch
+uses: Apeify/ci/.github/workflows/lint-and-test.yml@my-branch
+# ...and, in the same stub:
+uses: Apeify/ci/actions/deploy@my-branch
 ```
 
 GitHub resolves the ref at run time, so no tag or release is involved. Use
@@ -169,6 +178,37 @@ rather than minimal:
 Both put the entire private tree on the public web while every check reported
 success. Any new comparison must normalize both sides, and any spelling that
 survives `norm_path` is this bug a third time.
+
+**The pipeline is split across two mechanisms, and neither half can move.**
+`lint-and-test` is a reusable workflow; the deploy is a composite action. The
+asymmetry looks untidy and is load-bearing in both directions.
+
+The deploy must be an action because only a normal job can declare
+`environment:`, and the credentials are environment secrets. As a reusable
+workflow it could receive them only via `secrets: inherit`, which GitHub honors
+solely within one organization or enterprise - so a consumer under a different
+owner inherited nothing, silently, while the environment was still entered and
+`vars` still resolved.
+
+`lint-and-test` must stay a workflow because a job calling one cannot also
+declare `steps:` - GitHub rejects the file, and so does actionlint. That refusal
+is what guarantees third-party test code never shares a runner with the deploy
+key. Convert it to an action "for symmetry" and both halves land in one job's
+steps, and the guarantee is gone with no error anywhere.
+
+The costs of the split are worth stating plainly. actionlint does not understand
+composite actions - it parses `action.yml` as a workflow and reports nonsense -
+so the deploy half has no schema linting and no actionlint-driven shellcheck.
+[`tests/`](tests/) and validate.yml's extractor are its entire automated
+coverage, which is why the extractor checks `runs.using` and rejects a `run:`
+step with no `shell:`. And `vars` is unavailable inside a composite action
+altogether, so web roots arrive as an input rather than being read from context.
+
+There is also no wrapper reusable workflow, deliberately. `uses:` accepts no
+expressions and `uses: ./...` inside a reusable workflow resolves against the
+CALLER's checkout, so a wrapper could only name `actions/deploy@<hardcoded ref>`
+- and a consumer pinning the wrapper to a tag would silently get whatever that
+hardcoded ref moved to. One path is better than a wrapper that breaks pinning.
 
 **The production guard fails closed.** The containment check refuses the
 deploy if it cannot fetch `origin`, or if `origin/staging` does not resolve. An
@@ -271,7 +311,7 @@ that release's `checksums.txt`.
 scoped suppression. actionlint's built-in type for the `job` context is missing
 `workflow_ref`, `workflow_sha`, `workflow_repository`, and `workflow_file_path`,
 which GitHub documents and supports - so the pipeline-version logging in
-`deploy.yml` and `promote.yml` is reported as an undefined property. The ignore
+`promote.yml` is reported as an undefined property. The ignore
 pattern is anchored to the job context's object type, so a typo against any
 other context, or against a different `job` property, still fails the build.
 Delete the file and re-run after upgrading actionlint to see whether it is still
@@ -326,7 +366,8 @@ None of the four layers above can see any of that. actionlint passes all three.
 
 **The tests extract the shell from the workflow rather than restating it.**
 [`tests/lib/harness.sh`](tests/lib/harness.sh) pulls a step's `run:` body, or a
-single function, back out of [deploy.yml](.github/workflows/deploy.yml) with awk
+single function, back out of
+[actions/deploy/action.yml](actions/deploy/action.yml) with awk
 and runs it. A copy of the logic maintained under `tests/` would keep passing
 while the workflow was broken, which is the failure this layer exists to
 prevent. Extraction is structural, so every extractor asserts a sentinel and
@@ -351,7 +392,7 @@ did, until it was tightened.
 
 **How to know the suite still works: delete a guard and watch it fail.** A test
 that cannot fail is worse than no test, and this suite has twice been found
-green against a `deploy.yml` with a guard removed. The check is mechanical:
+green against an `action.yml` with a guard removed. The check is mechanical:
 
 ```bash
 mkdir -p /tmp/mut && tar --exclude=node_modules --exclude=.git -cf - . | (cd /tmp/mut && tar -xf -)
@@ -360,7 +401,7 @@ mkdir -p /tmp/mut && tar --exclude=node_modules --exclude=.git -cf - . | (cd /tm
 Then, inside the copy, delete one `check_relative_dir` or `reject_repo_root`
 call, or one `case` in the web-root overlap loop, and run `bash tests/run.sh`.
 It must fail, and it must fail naming that guard. Work in a copy: mutation
-testing edits the workflow, and a half-restored `deploy.yml` is a bad thing to
+testing edits the action, and a half-restored `action.yml` is a bad thing to
 leave in a working tree.
 
 **Verify the mutation applied before believing a pass.** This is the rule that

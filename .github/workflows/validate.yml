@@ -3,9 +3,10 @@ name: Validate workflows
 # Lints the reusable workflows in this repository before they can reach a
 # consuming site.
 #
-# This is the one workflow here that DOES have real triggers. deploy.yml and
-# promote.yml are `workflow_call`-only and cannot run on their own; this one is
-# the reason pushing here does anything at all.
+# This is the one workflow here that DOES have real triggers. lint-and-test.yml
+# and promote.yml are `workflow_call`-only and cannot run on their own, and
+# actions/deploy is not a workflow at all; this one is the reason pushing here
+# does anything at all.
 #
 # WHY IT EXISTS
 #
@@ -42,7 +43,7 @@ name: Validate workflows
 #    they are not `run:` blocks. This is a real gap rather than a theoretical
 #    one - see the step itself.
 #
-# 5. The test suite in tests/, which pulls the shell back OUT of deploy.yml and
+# 5. The test suite in tests/, which pulls the shell back OUT of actions/deploy/action.yml and
 #    runs it. Layers 1 to 4 all ask whether the code is well-formed; this one
 #    asks whether it does the right thing. Every defect that has reached a
 #    consuming site was well-formed shell that behaved wrongly - a guard above
@@ -92,7 +93,7 @@ jobs:
       # Parse every workflow, and write each `run:` block out as its own script
       # for the two checks that follow.
       #
-      # js-yaml pinned to an exact version, the same way deploy.yml pins
+      # js-yaml pinned to an exact version, the same way the deploy action pins
       # esbuild. Node is preinstalled on the runner; a YAML parser is not.
       #
       # GitHub expressions are substituted out before the scripts are written.
@@ -169,6 +170,54 @@ jobs:
               console.log(`parsed ${full}`);
               examplesParsed++;
             }
+          }
+
+          // Composite actions too, and this is not a nicety: actionlint parses
+          // action.yml as a workflow and reports nonsense, so it provides NO
+          // schema check and NO shellcheck for the deploy half of the pipeline.
+          // This extraction, plus tests/, is the whole of its automated coverage.
+          //
+          // Steps live under runs.steps rather than jobs.<id>.steps.
+          let actionsParsed = 0;
+          for (const dir of fs.existsSync('actions') ? fs.readdirSync('actions') : []) {
+            for (const name of ['action.yml', 'action.yaml']) {
+              const full = path.join('actions', dir, name);
+              if (!fs.existsSync(full)) continue;
+              let doc;
+              try {
+                doc = yaml.load(fs.readFileSync(full, 'utf8'));
+              } catch (e) {
+                console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
+                failed = true;
+                continue;
+              }
+              console.log(`parsed ${full}`);
+              actionsParsed++;
+
+              if (!doc.runs || doc.runs.using !== 'composite') {
+                console.log(`::error file=${full}::runs.using is not "composite".`);
+                failed = true;
+                continue;
+              }
+              for (const [i, step] of (doc.runs.steps || []).entries()) {
+                if (!step.run) continue;
+                // GitHub rejects a composite run step with no explicit shell, and
+                // it is the kind of omission that only surfaces at run time.
+                if (!step.shell) {
+                  console.log(`::error file=${full}::step "${step.name || i}" has run: but no shell:.`);
+                  failed = true;
+                }
+                const body = step.run.replace(/\$\{\{[^}]*\}\}/g, 'GH_EXPR');
+                const label = (step.name || `step${i}`).replace(/[^A-Za-z0-9]+/g, '_');
+                fs.writeFileSync(`/tmp/steps/action__${dir}__${label}.sh`, '#!/usr/bin/env bash\n' + body);
+                extracted++;
+              }
+            }
+          }
+
+          if (fs.existsSync('actions') && actionsParsed === 0) {
+            console.log('::error::actions/ exists but no action.yml was parsed - the filter is wrong.');
+            process.exit(1);
           }
 
           console.log(`extracted ${extracted} run-step(s)`);
@@ -314,7 +363,7 @@ jobs:
       # the failures they catch: a YAML slip reported as "no run: body found for
       # step X" would send a reader hunting in the wrong place.
       #
-      # The suite extracts the shell from deploy.yml rather than restating it,
+      # The suite extracts the shell from the deploy action rather than restating it,
       # so it cannot pass while the workflow is broken. See tests/run.sh.
       - name: Run the test suite
         shell: bash

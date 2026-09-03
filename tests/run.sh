@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Runs every *.test.sh in this directory.
 #
-# These tests exercise the shell embedded in .github/workflows/deploy.yml by
+# These tests exercise the shell embedded in actions/deploy/action.yml by
 # extracting it and running it, so they test the code that ships rather than a
-# transcription of it. They need bash, awk and git - nothing installed, no
+# transcription of it. actionlint cannot read a composite action at all, so for
+# that file this suite and validate.yml's extractor are the only checks there
+# are. They need bash, awk and git - nothing installed, no
 # network - so a broken change is caught before any download-dependent step
 # starts.
 #

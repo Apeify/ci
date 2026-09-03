@@ -1,0 +1,142 @@
+name: Lint and test
+
+# Reusable. Syntax-checks the PHP, installs dev dependencies, and runs whichever
+# test suite the repo actually has - then publishes the values the deploy step
+# needs.
+#
+# WHY THIS IS A WORKFLOW AND NOT AN ACTION
+#
+# This is the half of the pipeline that must run in its own VM, and shipping it
+# as a reusable workflow is what makes that structural rather than advisory.
+#
+# Tests execute third-party code: a Composer install pulls arbitrary packages and
+# runs their scripts. Secrets are not ambient environment variables, so that code
+# cannot read a deploy key directly - but a job shares one runner and one working
+# directory with everything after it. Code running during dependency
+# installation could tamper with public/, plant files, or poison tooling, and a
+# deploy in the same job would faithfully rsync the result to a live site.
+#
+# A job that calls a reusable workflow CANNOT also declare `steps:` - GitHub
+# rejects the file, and so does actionlint. So a consumer cannot put this and the
+# deploy action in one job even by accident. If this were ever converted to a
+# composite action "for symmetry" with actions/deploy, both would land in one
+# job's steps and that guarantee would silently evaporate. Do not do that.
+#
+# It declares no `environment:`, so environment secrets are never in scope here
+# at all, and `permissions:` is the minimum a checkout needs.
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        description: PHP version used for the lint and test steps.
+        type: string
+        default: '8.3'
+      environment:
+        description: >-
+          Override which environment the deploy targets. Normally derived from
+          the branch; set it for a Disaster Recovery or preview target.
+        type: string
+        default: ''
+    outputs:
+      environment:
+        description: >-
+          The environment the deploy should target. Published here so the branch
+          mapping lives in ONE place: the caller feeds it to both its
+          `environment:` block and the deploy action, rather than writing the
+          same ternary twice and letting the two drift.
+        value: ${{ jobs.lint-and-test.outputs.environment }}
+      attestation:
+        description: >-
+          Proof this job ran. actions/deploy requires it, which is what stops a
+          consumer omitting this job: `needs.<job>.outputs.*` cannot be
+          referenced unless the job exists and is listed in `needs`.
+        value: ${{ jobs.lint-and-test.outputs.attestation }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required: a checkout of a private repo authenticates with GITHUB_TOKEN.
+      contents: read
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      attestation: ${{ steps.resolve.outputs.attestation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Resolved early, and validated here rather than at the deploy: this job
+      # holds no credentials and enters no environment, so a bad value costs a
+      # failed lint run instead of a failure inside a job that already has
+      # production secrets in scope.
+      - name: Resolve deploy environment
+        id: resolve
+        shell: bash
+        env:
+          OVERRIDE: ${{ inputs.environment }}
+          BRANCH_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$OVERRIDE" ]; then
+            # Validated HERE, in the job with no credentials, so a bad value
+            # fails before the deploy job enters an environment and puts secrets
+            # in scope. An environment name is a GitHub identifier: whitespace
+            # in it cannot match any environment, and an all-whitespace value
+            # would reach the deploy as an empty string, which is exactly the
+            # input the deploy action refuses.
+            case "$OVERRIDE" in
+              *[[:space:]]*)
+                echo "::error::environment input '${OVERRIDE}' contains whitespace."
+                echo "Pass the environment's exact name, or omit the input to derive it from the branch."
+                exit 1 ;;
+            esac
+            resolved="$OVERRIDE"
+          elif [ "$BRANCH_REF" = "refs/heads/main" ]; then
+            resolved="production"
+          else
+            resolved="staging"
+          fi
+
+          echo "environment=${resolved}" >> "$GITHUB_OUTPUT"
+          echo "attestation=lint-and-test:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "Deploy environment resolved to '${resolved}'."
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ inputs.php-version }}
+
+      - name: Syntax check all PHP files
+        shell: bash
+        run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 -P4 php -l
+
+      # Detected, not configured. A repo either has a Composer manifest or it
+      # does not; asking the caller to declare that in an input would just be a
+      # second place for the truth to live, and a second place to get it wrong.
+      - name: Install development dependencies
+        shell: bash
+        run: |
+          if [ -f composer.json ]; then
+            composer install --no-interaction --no-progress --no-ansi
+          else
+            echo "No composer.json - skipping."
+          fi
+
+      # Same principle: run whichever suite the repo actually has. A repo with
+      # no tests yet is a normal state, not a failure, so say so and move on.
+      #
+      # Note this step goes green having run nothing when neither exists. That
+      # is deliberate, but it means "the job passed" is not the same as "tests
+      # ran" - read the log when it matters.
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ -f tests/run.php ]; then
+            php tests/run.php
+          elif [ -x vendor/bin/phpunit ]; then
+            vendor/bin/phpunit
+          else
+            echo "::notice::No test suite found (looked for tests/run.php and vendor/bin/phpunit)."
+          fi
