@@ -76,10 +76,16 @@ jobs:
           base-dir: ${{ secrets.DEPLOY_BASE_DIR }}
           port: ${{ secrets.DEPLOY_PORT }}
           host-key: ${{ secrets.DEPLOY_HOST_KEY }}
-          # MIRROR deploy.yml's inputs here, not just its secrets and variables.
-          # These are stub-level, so nothing carries them over for you, and a DR
-          # deploy missing them runs --delete against server-managed state on
-          # the failover host - the one place it is least recoverable.
-          app-excludes: |
-            cache/
-            config/mail.php
+          # MIRROR whatever deploy.yml sets here, not just its secrets and
+          # variables. These are stub-level, so nothing carries them over for
+          # you, and a DR deploy missing them runs --delete against
+          # server-managed state on the failover host - the one place it is
+          # least recoverable.
+          #
+          # Commented out to match deploy.yml, which ships with none because
+          # the right list differs per site. If you filled it in there, fill in
+          # the SAME list here.
+          #
+          # app-excludes: |
+          #   cache/
+          #   config/mail.php

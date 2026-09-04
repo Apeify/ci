@@ -109,7 +109,11 @@
 #                    .github are always excluded regardless.
 #   app-excludes     rsync excludes for app-dir, ONE PER LINE. Use for
 #                    server-managed state or server-only config that a deploy
-#                    must not overwrite.
+#                    must not overwrite. NO DEFAULT, and commented out below on
+#                    purpose - it is the only guard against --delete removing
+#                    what the server owns under app/, and the right list is
+#                    different for every site, so it has to be written rather
+#                    than inherited.
 #
 # OUTPUTS the deploy action publishes. Give the step an `id:` - this stub uses
 # `id: deploy` - and read `steps.deploy.outputs.<name>` from a LATER STEP OF
@@ -249,13 +253,24 @@ jobs:
           base-dir: ${{ secrets.DEPLOY_BASE_DIR }}
           port: ${{ secrets.DEPLOY_PORT }}
           host-key: ${{ secrets.DEPLOY_HOST_KEY }}
-          # Server-managed state and server-only config: the deploy must never
-          # overwrite these with whatever happens to be in the repo. One pattern
-          # per line - every list here is newline-separated, never
+          # Server-managed state and server-only config that the deploy must
+          # never overwrite. COMMENTED OUT ON PURPOSE, and left that way unless
+          # you have something to list: there is no default, because the right
+          # answer is different for every site.
+          #
+          # This is the ONLY thing standing between `rsync --delete` and
+          # whatever the server owns under app/. Anything there that the repo
+          # does not also contain is removed on the next deploy unless it is
+          # named here - so write this list from YOUR server's layout. The two
+          # lines below are one site's answer, shown to make the shape obvious,
+          # not a starting set to inherit.
+          #
+          # One pattern per line. Every list here is newline-separated, never
           # space-separated, so a pattern containing a space still works.
-          app-excludes: |
-            cache/
-            config/mail.php
+          #
+          # app-excludes: |
+          #   cache/
+          #   config/mail.php
 
       # Post-deploy steps go HERE, in this job, after the action. That is
       # possible because the deploy is an action rather than a reusable
