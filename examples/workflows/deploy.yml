@@ -52,7 +52,12 @@
 #
 #   WEB_ROOT_DIRS    required  Web-root directory NAMES, ONE PER LINE, each
 #                              relative to DEPLOY_BASE_DIR.
-#   SITE_URL         optional  Public URL of this environment's site.
+#   SITE_URL         optional  The hostname that gets the clickable link on the
+#                              deployment. ONE value even when WEB_ROOT_DIRS
+#                              lists several - a GitHub deployment record holds
+#                              one URL. The other roots deploy identically and
+#                              are just not linked; use the web-roots output to
+#                              check them.
 #
 # PERMISSIONS: nothing to do for this stub. The deploy only reads the repo.
 # promote.yml is the one that needs write, and grants it on its own job.

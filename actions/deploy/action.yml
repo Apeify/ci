@@ -86,7 +86,13 @@ inputs:
   site-url:
     description: >-
       Public URL of this environment's site, used only for logging. The
-      clickable deployment link comes from the caller's `environment.url`.
+      clickable deployment link comes from the caller's `environment.url`,
+      which this normally mirrors.
+
+      One value even when web-root-dirs lists several roots, because a GitHub
+      deployment record holds a single URL. With more than one root this names
+      the hostname that gets linked; the others are deployed identically and
+      simply are not named. The web-roots output lists them all.
     required: false
   public-dir:
     description: Repo directory whose CONTENTS are deployed to each web root.

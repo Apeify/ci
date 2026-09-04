@@ -194,7 +194,12 @@ disagree, so what you see here is always what is in `examples/`.
 #
 #   WEB_ROOT_DIRS    required  Web-root directory NAMES, ONE PER LINE, each
 #                              relative to DEPLOY_BASE_DIR.
-#   SITE_URL         optional  Public URL of this environment's site.
+#   SITE_URL         optional  The hostname that gets the clickable link on the
+#                              deployment. ONE value even when WEB_ROOT_DIRS
+#                              lists several - a GitHub deployment record holds
+#                              one URL. The other roots deploy identically and
+#                              are just not linked; use the web-roots output to
+#                              check them.
 #
 # PERMISSIONS: nothing to do for this stub. The deploy only reads the repo.
 # promote.yml is the one that needs write, and grants it on its own job.
@@ -609,7 +614,7 @@ no configuration is shared between site repos.
 | Variable | Required | Meaning |
 |---|---|---|
 | `WEB_ROOT_DIRS` | yes | One or more web-root directory **names**, one per line, each relative to `DEPLOY_BASE_DIR` |
-| `SITE_URL` | no | Public URL of this environment's site. Used only for the link GitHub shows on the deployment |
+| `SITE_URL` | no | The hostname that gets the clickable link on the deployment. One value even with several web roots, because a GitHub deployment record holds one URL - see [`WEB_ROOT_DIRS`](#web_root_dirs-and-the-one-thing-to-know-before-using-more-than-one) |
 
 ### Inputs
 
@@ -920,6 +925,40 @@ the same runtime state beneath it. If the application behaves differently per
 hostname it must key that on `HTTP_HOST`, and anything it writes to disk must be
 keyed by host too. Do not list more than one root unless the app is built for
 it.
+
+### `SITE_URL` names one of them, deliberately
+
+There are many roots and exactly one `SITE_URL`, and that is not an oversight to
+be fixed by adding more. `SITE_URL` feeds the job's `environment.url`, and a
+GitHub deployment record holds a single URL - there is no arrangement of this
+pipeline that shows three clickable links on one deployment. Reaching several
+addresses that way would mean several Environments, each with its own deployment
+record, which is a different thing entirely.
+
+So with more than one root, read `SITE_URL` as **which hostname gets the link**,
+not as "the site's address". The others are deployed identically and are simply
+not named in GitHub's UI.
+
+That matters more than it sounds, because the content is guaranteed identical
+but the **web server configuration is per host**. A check against `SITE_URL`
+proves the linked hostname works and proves nothing about the vanity mirror -
+which is exactly where a misconfiguration survives, since nobody visits it.
+
+The [`web-roots` output](#outputs) is how you reach the rest. It is a JSON array
+of the roots that were written, so a post-deploy step can check every one:
+
+```yaml
+- name: Check every hostname, not just the linked one
+  run: |
+    echo '${{ steps.deploy.outputs.web-roots }}' | jq -r '.[]' | while read -r host; do
+      curl -fsS -o /dev/null "https://$host/" || { echo "::error::$host failed"; exit 1; }
+    done
+```
+
+That snippet assumes the web-root directory is named after the hostname it serves, which is
+a convention used by some web hosting providers,  and how these stubs are written - but it is
+only a convention, not something this pipeline enforces or validates. If a root is
+named anything else, map the names to URLs yourself.
 
 ## The layout must not overlap
 
