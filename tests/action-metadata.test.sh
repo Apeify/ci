@@ -147,6 +147,35 @@ runs:
       shell: bash
       run: echo hi'
 
+# A hyphen inside a step id is a continuation, not a context boundary. This one
+# was a live false positive: the deploy action's own `public-changed` output
+# reads from a step called `public-sync`, and the checker rejected it for using
+# a 'sync' context. Real actions use hyphenated ids, so this is not an edge.
+assert_exit 0 "a hyphenated step id is not read as a context" rc 'name: x
+description: y
+outputs:
+  z:
+    description: d
+    value: ${{ steps.public-sync.outputs.changed }}
+runs:
+  using: composite
+  steps:
+    - id: public-sync
+      shell: bash
+      run: echo hi'
+assert_exit 1 "a hyphen does not become a place to hide a bad context" rc 'name: x
+description: y
+outputs:
+  z:
+    description: d
+    value: ${{ steps.a.outputs.b }}-${{ vars.NOPE }}
+runs:
+  using: composite
+  steps:
+    - id: a
+      shell: bash
+      run: echo hi'
+
 # Indentation is a style choice, not structure.
 assert_exit 0 "a four-space-indented action is accepted" rc 'name: x
 description: y

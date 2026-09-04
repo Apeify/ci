@@ -82,11 +82,14 @@ function* strings(node, trail) {
 // followed by a dot, so `fromJSON(steps.s.outputs.json).name` yields `steps`
 // and not `fromJSON` - the function name is followed by `(`, and `).name` has
 // no word before the dot. Single-quoted literals are stripped first so
-// `format('a.b', steps.x)` does not report a phantom `a`.
+// `format('a.b', steps.x)` does not report a phantom `a`. A hyphen counts as a
+// word character for this purpose: step ids and output names may contain one,
+// so `steps.public-sync.outputs.changed` must yield `steps` and not `sync`. No
+// GitHub expression operator is a bare `-`, so nothing real is hidden by that.
 function contextsIn(expression) {
   const withoutLiterals = expression.replace(/'(?:[^']|'')*'/g, "''");
   const found = new Set();
-  for (const m of withoutLiterals.matchAll(/(?:^|[^\w.])([A-Za-z_][\w-]*)\s*\./g)) {
+  for (const m of withoutLiterals.matchAll(/(?:^|[^\w.-])([A-Za-z_][\w-]*)\s*\./g)) {
     found.add(m[1]);
   }
   return found;

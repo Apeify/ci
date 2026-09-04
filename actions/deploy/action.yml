@@ -125,6 +125,108 @@ inputs:
     required: false
     default: ''
 
+# WHAT IS DELIBERATELY NOT HERE
+#
+# Nothing derived from a secret. base-dir, host and user are secrets, so the
+# rsync destination, the account path, and any summary built from them stay in
+# the log where masking applies. Step and job outputs are stored and readable
+# through the API, and a value concatenated here from a secret and a non-secret
+# may not be masked at all. What ships is names and counts.
+#
+# No interpretations either. `paths-deleted: 412` is a fact a consumer can write
+# a policy against; a `risky: true` computed here would bake one site's policy
+# into shared code.
+#
+# And not the itemized change list. Outputs are size-capped and a large deploy
+# produces thousands of lines; it already streams to the log, and anything
+# wanting it retained should upload an artifact.
+#
+# These are only set on the SUCCESS path. If a step fails the action stops and
+# every output is unset, so a consumer reading them must not assume presence.
+outputs:
+  # -------------------------------------------------------- what was deployed
+  deployed-sha:
+    description: >-
+      The commit this deploy shipped. Correlate a deploy with monitoring, or
+      have a smoke check assert the live site reports this exact commit rather
+      than waiting out opcache and hoping.
+    value: ${{ steps.preflight.outputs.deployed-sha }}
+  pipeline-ref:
+    description: >-
+      The ref this action was resolved at, from the caller's `uses:`. A SHA when
+      pinned; the branch name when tracking one.
+    value: ${{ steps.summary.outputs.pipeline-ref }}
+
+  # ---------------------------------------------------------------- topology
+  web-roots:
+    description: >-
+      JSON array of the normalized web root names written to. JSON rather than
+      newline-separated so a caller can `fromJSON()` it into a matrix or loop it
+      in a smoke check without parsing.
+    value: ${{ steps.preflight.outputs.web-roots }}
+  web-root-count:
+    description: How many web roots were written to.
+    value: ${{ steps.preflight.outputs.web-root-count }}
+  app-deployed:
+    description: '''true'' when the private tree was synced, ''false'' when deploy-app-dir turned it off.'
+    value: ${{ steps.preflight.outputs.app-deployed }}
+  app-remote-dir:
+    description: >-
+      The normalized name the private tree takes on the server, or empty when
+      the app sync was skipped. A name, not a path - deliberately not joined to
+      base-dir, which is a secret.
+    value: ${{ steps.preflight.outputs.app-remote-dir }}
+
+  # ------------------------------------------------------------ what changed
+  changed:
+    description: >-
+      'true' when anything transferred or was deleted, across both syncs. Gate a
+      CDN purge, a notification, or a smoke check on it. Note it is driven by
+      rsync's transferred-file count, which excludes a file whose only change
+      was its mtime or permissions, so a metadata-only deploy reports false.
+    value: ${{ steps.summary.outputs.changed }}
+  public-changed:
+    description: '''true'' when the public sync moved or removed anything.'
+    value: ${{ steps.public-sync.outputs.changed }}
+  app-changed:
+    description: >-
+      'true' when the app sync moved or removed anything. Empty when the app sync
+      was skipped.
+    value: ${{ steps.app-sync.outputs.changed }}
+  files-transferred:
+    description: Files transferred, summed across every web root and the app sync.
+    value: ${{ steps.summary.outputs.files-transferred }}
+  bytes-transferred:
+    description: Bytes transferred, summed the same way.
+    value: ${{ steps.summary.outputs.bytes-transferred }}
+  paths-deleted:
+    description: >-
+      Paths removed by --delete, summed the same way. One per deleted file AND
+      one per deleted directory, so removing a directory of three files counts
+      four. That is deliberate: --delete is the destructive half and this is
+      the only hook on it, so it counts everything that went. It is post-hoc
+      though - the paths are already gone by the time it exists, so a consumer
+      fails the run AFTER a deploy that removed more than expected; it cannot
+      refuse one.
+    value: ${{ steps.summary.outputs.paths-deleted }}
+
+  # ------------------------------------------------------------- operational
+  host-key-pinned:
+    description: >-
+      'true' when DEPLOY_HOST_KEY was supplied, 'false' when the deploy fell back
+      to ssh-keyscan. A consumer can fail its own build if production ever
+      deployed over trust-on-first-use.
+    value: ${{ steps.ssh.outputs.host-key-pinned }}
+  started-at:
+    description: UTC ISO 8601 timestamp taken at the start of the preflight.
+    value: ${{ steps.preflight.outputs.started-at }}
+  finished-at:
+    description: UTC ISO 8601 timestamp taken after the last sync.
+    value: ${{ steps.summary.outputs.finished-at }}
+  duration-seconds:
+    description: Wall time between those two.
+    value: ${{ steps.summary.outputs.duration-seconds }}
+
 runs:
   using: composite
   steps:
@@ -201,6 +303,7 @@ runs:
     # looks like a key-format problem, and an empty web root is far worse than
     # that - see the validation of WEB_ROOT_DIRS below.
     - name: Preflight - check configuration
+      id: preflight
       shell: bash
       env:
         RESOLVED_ENVIRONMENT: ${{ inputs.environment }}
@@ -247,6 +350,23 @@ runs:
         # Both placed the entire private tree inside a served web root while
         # every check reported success. Any new spelling that survives this
         # function is the same bug again: normalize, then compare.
+        #
+        # (norm_path itself is defined below, after these captures.)
+
+        # Facts this action publishes as outputs, captured before any guard can
+        # exit. The commit is read here rather than inside the production branch
+        # below because every environment wants to know what it deployed, and a
+        # consumer correlating a deploy against monitoring should not have to
+        # care which environment it was.
+        deployed_sha=$(git rev-parse HEAD)
+        # One `date` call for both representations. Reading the epoch again
+        # later made started-at and started-epoch different instants, so
+        # duration-seconds did not match the interval between the two
+        # timestamps it is documented as measuring - on a production deploy the
+        # gap included the whole origin fetch.
+        started_epoch=$(date -u +%s)
+        started_at=$(date -u -d "@${started_epoch}" +%Y-%m-%dT%H:%M:%SZ)
+
         norm_path() {
           printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
         }
@@ -263,6 +383,15 @@ runs:
           case "$value" in
             /*)   echo "::error::${label} '${value}' must be relative to its parent, not an absolute path."; return 1 ;;
             *..*) echo "::error::${label} '${value}' must not contain '..'."; return 1 ;;
+            # A double quote or backslash would break the web-roots JSON output,
+            # which is built by hand and states these cannot occur. That claim
+            # was false until this line existed: 'my"site.com' produced
+            # ["my"site.com"], which a consumer's fromJSON() rejects AFTER both
+            # rsyncs have already written and deleted. A backslash is worse -
+            # ["a\b"] parses as a different name, so a matrix silently targets
+            # the wrong root. Neither belongs in a web root name anyway.
+            *\"*) echo "::error::${label} '${value}' must not contain a double quote."; return 1 ;;
+            *"\\"*) echo "::error::${label} '${value}' must not contain a backslash."; return 1 ;;
           esac
 
           # Normalize, then re-test what is left. Trailing slashes are
@@ -354,7 +483,7 @@ runs:
           # cancel-in-progress became false - or if main moves after dispatch.
           # It is the WORKSPACE that gets rsynced, so validating origin/main
           # would approve a commit this run is not deploying.
-          deploying=$(git rev-parse HEAD)
+          deploying="$deployed_sha"
 
           if ! git merge-base --is-ancestor "$deploying" origin/staging; then
             echo "::error::The commit being deployed is not contained in staging - refusing to deploy production."
@@ -382,6 +511,30 @@ runs:
           echo "Without it the production refusals below cannot run, so this is fatal rather than defaulted."
           exit 1
         fi
+
+        # Exactly 'true' or 'false', refused otherwise, because the step gate
+        # and this shell compare it DIFFERENTLY. GitHub's `==` on strings is
+        # case-insensitive, POSIX `[ = ]` is not - so 'True' made every reader
+        # here say false while `if: inputs.deploy-app-dir == 'true'` on the app
+        # sync said true. That combination skipped reject_repo_root,
+        # check_relative_dir, the app-inside-public checks and the
+        # app-inside-web-root loop, and then rsynced the private tree anyway:
+        # 'True' plus 'app-remote-dir: site.com/app' published the whole app
+        # tree over HTTP, and plus '../shared' ran --delete outside the account
+        # home.
+        #
+        # Normalizing the case here would fix the disagreement too, but
+        # refusing is better: it leaves exactly one spelling for each value, so
+        # a future reader cannot reintroduce the split by comparing the raw
+        # string somewhere new.
+        case "$DEPLOY_APP_DIR" in
+          true|false) ;;
+          *)
+            echo "::error::deploy-app-dir must be exactly 'true' or 'false' (got '${DEPLOY_APP_DIR}')."
+            echo "It is a string, and it is compared case-sensitively here but case-INSENSITIVELY by the"
+            echo "step condition that runs the app sync, so any other spelling makes the two disagree."
+            exit 1 ;;
+        esac
 
         missing=""
         for name in DEPLOY_SSH_KEY DEPLOY_HOST DEPLOY_USER DEPLOY_BASE_DIR; do
@@ -618,6 +771,47 @@ runs:
           echo "app dir:        none (deploy-app-dir is false)"
         fi
 
+        # ------------------------------------------------------------ outputs
+        #
+        # Facts, never interpretations. `paths-deleted: 412` is something a
+        # consumer can write a policy against; a `risky: true` computed here
+        # would bake one site's policy into shared code.
+        #
+        # NOTHING DERIVED FROM A SECRET GOES IN HERE. base-dir, host and user
+        # are secrets, so the rsync destination, the account path and any
+        # summary built from them stay in the log where masking applies. What
+        # ships is names and counts.
+        #
+        # Web roots are emitted as JSON so a caller can fromJSON() them straight
+        # into a matrix. Building it by hand rather than with jq: the runner has
+        # jq, but a self-contained loop is one less thing to depend on, and the
+        # values are already validated to contain no quotes or backslashes.
+        roots_json="["
+        sep=""
+        for wr in "${web_roots[@]}"; do
+          roots_json="${roots_json}${sep}\"${wr}\""
+          sep=","
+        done
+        roots_json="${roots_json}]"
+
+        {
+          echo "deployed-sha=${deployed_sha}"
+          echo "started-at=${started_at}"
+          echo "started-epoch=${started_epoch}"
+          echo "web-roots=${roots_json}"
+          echo "web-root-count=${#web_roots[@]}"
+          echo "app-remote-dir=${app_norm:-}"
+          # The effective value, not the raw input. F1 above already limits it
+          # to two spellings, so this is belt and braces - but an output that
+          # passes its input through is one validation change away from
+          # publishing something a consumer's `== 'false'` will never match.
+          if [ "$DEPLOY_APP_DIR" = "true" ]; then
+            echo "app-deployed=true"
+          else
+            echo "app-deployed=false"
+          fi
+        } >> "$GITHUB_OUTPUT"
+
     # Values reach the shell through `env:`, never by interpolating
     # `${{ ... }}` into the script body. A branch name or variable value is
     # attacker-influencable in principle, and interpolation splices it into
@@ -839,6 +1033,7 @@ runs:
         done
 
     - name: Configure SSH
+      id: ssh
       shell: bash
       env:
         SSH_KEY: ${{ inputs.ssh-key }}
@@ -863,6 +1058,7 @@ runs:
           # Pinned host key: we know what we expect to be talking to.
           printf '%s\n' "$HOST_KEY" >> ~/.ssh/known_hosts
           echo "Using pinned DEPLOY_HOST_KEY."
+          echo "host-key-pinned=true" >> "$GITHUB_OUTPUT"
         else
           # Trust on first use. This accepts whatever the server presents, on
           # every run, so it cannot detect a substituted host. Set
@@ -876,6 +1072,7 @@ runs:
           # would contradict that for no gain.
           echo "::warning::DEPLOY_HOST_KEY is not set - falling back to ssh-keyscan (trust on first use)."
           ssh-keyscan -p "${SSH_PORT:-22}" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "host-key-pinned=false" >> "$GITHUB_OUTPUT"
         fi
 
     # Nothing is deployed until the expected layout is actually present.
@@ -930,6 +1127,7 @@ runs:
     # Every web root gets the identical tree. They are not ranked: the app
     # tells them apart at runtime by HTTP_HOST, not by which copy it loaded.
     - name: Rsync public/ contents into each web root
+      id: public-sync
       if: steps.layout.outputs.ready == 'true'
       shell: bash
       env:
@@ -981,11 +1179,48 @@ runs:
           printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
         }
 
+        # (The transfer-stats helper above is unrelated to the paths below.)
+
         # Building the destination from the SAME spelling the preflight
         # checked matters beyond cosmetics: "/home/u//site.com//" in a log
         # looks like a bug and invites someone to "fix" it, and a path shown
         # here that differs from the one the nesting checks approved is
         # exactly how a reader talks themselves out of trusting either.
+        # Transfer facts for this action's outputs. Defined in both rsync steps
+        # because Actions steps are separate shells, the same reason norm_path
+        # is.
+        #
+        # Parsed from the transfer rather than guessed. `*deleting` lines are
+        # the only version-independent record of what --delete actually removed:
+        # rsync's own "Number of deleted files" stat did not exist before 3.1.
+        # Both figures SUM across the log, because the public step runs rsync
+        # once per web root and reading a single block would report the last
+        # root only.
+        sync_log=$(mktemp)
+
+        emit_transfer_stats() {
+          log="$1"
+          transferred=$(awk -F': *' '/^Number of regular files transferred:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
+          bytes=$(awk -F': *' '/^Total transferred file size:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
+          # `|| true` because grep exits 1 when it matches nothing, which is
+          # the ordinary no-deletions case. It still prints 0, so no default is
+          # needed after it.
+          deleted=$(grep -c '^\*deleting' "$log" || true)
+
+          {
+            echo "files-transferred=${transferred}"
+            echo "bytes-transferred=${bytes}"
+            echo "paths-deleted=${deleted}"
+            if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
+              echo "changed=true"
+            else
+              echo "changed=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+          echo "transferred ${transferred} file(s), ${bytes} byte(s); removed ${deleted} path(s)"
+        }
+
         base=$(norm_path "$BASE_DIR")
         src=$(norm_path "$PUBLIC_DIR")
 
@@ -1019,13 +1254,18 @@ runs:
           fi
 
           echo "::group::rsync ${src}/ -> ${dir}"
+          # tee, not a redirect: the transfer stays visible in the log AND
+          # becomes countable. Under `pipefail` an rsync failure still fails the
+          # step, which a command substitution would have swallowed.
           rsync -az --delete --itemize-changes --stats \
             "${exclude_args[@]}" \
             -e "ssh -i ~/.ssh/deploy_key -p ${SSH_PORT:-22}" \
             "${src}/" \
-            "${SSH_USER}@${SSH_HOST}:${base}/${dir}/"
+            "${SSH_USER}@${SSH_HOST}:${base}/${dir}/" 2>&1 | tee -a "$sync_log"
           echo "::endgroup::"
         done <<< "$WEB_ROOT_DIRS"
+
+        emit_transfer_stats "$sync_log"
 
     # DANGER: the destination MUST be <BASE_DIR>/<name>/ with a NON-EMPTY
     # <name>. If <name> were ever empty the destination would collapse to
@@ -1048,18 +1288,17 @@ runs:
     # Synced once, regardless of how many web roots there are. See the header:
     # every root shares this one directory.
     - name: Rsync app directory above the web roots
+      id: app-sync
       # `== 'true'`, NOT a bare truthiness test. Composite action inputs are
       # always strings and GitHub casts every non-empty string to true, so
       # `&& inputs.deploy-app-dir` ran this step for the value 'false'. It
       # survived the conversion from a typed boolean workflow input, where the
-      # bare form was correct. Every other reader of this value already compares
-      # it as a string; this was the one that did not.
-      # `== 'true'`, NOT a bare truthiness test. Composite action inputs are
-      # always strings and GitHub casts every non-empty string to true, so
-      # `&& inputs.deploy-app-dir` ran this step for the value 'false'. It
-      # survived the conversion from a typed boolean workflow input, where the
-      # bare form was correct. Every other reader of this value already compares
-      # it as a string; this was the one that did not.
+      # bare form was correct.
+      #
+      # Note this comparison and the shell's do NOT agree on case: GitHub's `==`
+      # is case-insensitive, POSIX `[ = ]` is not. The preflight refuses any
+      # spelling but 'true' and 'false' precisely so the two can never diverge -
+      # see the deploy-app-dir check there.
       if: steps.layout.outputs.ready == 'true' && inputs.deploy-app-dir == 'true'
       shell: bash
       env:
@@ -1099,6 +1338,41 @@ runs:
           printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
         }
 
+        # Transfer facts for this action's outputs. Defined in both rsync steps
+        # because Actions steps are separate shells, the same reason norm_path
+        # is.
+        #
+        # Parsed from the transfer rather than guessed. `*deleting` lines are
+        # the only version-independent record of what --delete actually removed:
+        # rsync's own "Number of deleted files" stat did not exist before 3.1.
+        # Both figures SUM across the log, because the public step runs rsync
+        # once per web root and reading a single block would report the last
+        # root only.
+        sync_log=$(mktemp)
+
+        emit_transfer_stats() {
+          log="$1"
+          transferred=$(awk -F': *' '/^Number of regular files transferred:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
+          bytes=$(awk -F': *' '/^Total transferred file size:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
+          # `|| true` because grep exits 1 when it matches nothing, which is
+          # the ordinary no-deletions case. It still prints 0, so no default is
+          # needed after it.
+          deleted=$(grep -c '^\*deleting' "$log" || true)
+
+          {
+            echo "files-transferred=${transferred}"
+            echo "bytes-transferred=${bytes}"
+            echo "paths-deleted=${deleted}"
+            if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
+              echo "changed=true"
+            else
+              echo "changed=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+          echo "transferred ${transferred} file(s), ${bytes} byte(s); removed ${deleted} path(s)"
+        }
+
         base=$(norm_path "$BASE_DIR")
         src=$(norm_path "$APP_DIR")
 
@@ -1124,7 +1398,52 @@ runs:
           "${exclude_args[@]}" \
           -e "ssh -i ~/.ssh/deploy_key -p ${SSH_PORT:-22}" \
           "${src}/" \
-          "${SSH_USER}@${SSH_HOST}:${base}/${remote}/"
+          "${SSH_USER}@${SSH_HOST}:${base}/${remote}/" 2>&1 | tee -a "$sync_log"
+
+        emit_transfer_stats "$sync_log"
+
+    # Aggregates the two syncs into one set of figures. Separate from them
+    # because the app step carries an `if:` and is skipped for a site with no
+    # private tree - a skipped step's outputs are empty strings, so every read
+    # below defaults, and the totals stay correct rather than becoming blank.
+    #
+    # Runs on the success path only. If any step above failed this never
+    # executes and every output is unset, which is the documented behavior of
+    # action outputs and the reason diagnosis belongs in the log, not here.
+    - name: Summarize the deploy
+      id: summary
+      shell: bash
+      env:
+        PUBLIC_TRANSFERRED: ${{ steps.public-sync.outputs.files-transferred }}
+        PUBLIC_BYTES: ${{ steps.public-sync.outputs.bytes-transferred }}
+        PUBLIC_DELETED: ${{ steps.public-sync.outputs.paths-deleted }}
+        APP_TRANSFERRED: ${{ steps.app-sync.outputs.files-transferred }}
+        APP_BYTES: ${{ steps.app-sync.outputs.bytes-transferred }}
+        APP_DELETED: ${{ steps.app-sync.outputs.paths-deleted }}
+        STARTED_EPOCH: ${{ steps.preflight.outputs.started-epoch }}
+        PIPELINE_REF: ${{ github.action_ref }}
+      run: |
+        transferred=$(( ${PUBLIC_TRANSFERRED:-0} + ${APP_TRANSFERRED:-0} ))
+        bytes=$(( ${PUBLIC_BYTES:-0} + ${APP_BYTES:-0} ))
+        deleted=$(( ${PUBLIC_DELETED:-0} + ${APP_DELETED:-0} ))
+
+        finished_epoch=$(date -u +%s)
+
+        {
+          echo "files-transferred=${transferred}"
+          echo "bytes-transferred=${bytes}"
+          echo "paths-deleted=${deleted}"
+          echo "finished-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "duration-seconds=$(( finished_epoch - ${STARTED_EPOCH:-finished_epoch} ))"
+          echo "pipeline-ref=${PIPELINE_REF}"
+          if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
+            echo "changed=true"
+          else
+            echo "changed=false"
+          fi
+        } >> "$GITHUB_OUTPUT"
+
+        echo "deploy summary: ${transferred} file(s) transferred, ${deleted} deleted, ${bytes} byte(s)"
 
     - name: Clean up SSH key
       shell: bash

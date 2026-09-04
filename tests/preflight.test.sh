@@ -37,7 +37,14 @@ preflight() {
     DEPLOY_APP_DIR=true
     RESOLVED_ENVIRONMENT=staging
     GITHUB_REF=refs/heads/staging
+    # The runner always provides this, and the preflight writes its outputs
+    # there. `env -i` strips the whole environment, so without it every
+    # success-path assertion fails on an ambiguous redirect rather than on
+    # anything the test is about. Pointed at a real file rather than /dev/null
+    # so a test can read back what was emitted.
+    "GITHUB_OUTPUT=${WORK}/github_output"
   )
+  : > "${WORK}/github_output"
   env -i PATH="$PATH" HOME="$HOME" "${env[@]}" "$@" "${GH_BASH[@]}" "$PREFLIGHT"
 }
 
@@ -50,6 +57,72 @@ assert_exit 0 "a trailing newline in WEB_ROOT_DIRS is ordinary input" \
 assert_exit 0 "several sibling web roots" preflight "WEB_ROOT_DIRS=a.com
 b.com"
 assert_exit 0 "app-remote-dir may differ from app-dir" preflight APP_REMOTE_DIR=private
+
+# Run the preflight, then read one key back out of the outputs it emitted.
+pf_output() {
+  local key="$1"; shift
+  preflight "$@" >/dev/null 2>&1 || true
+  sed -n "s/^${key}=//p" "${WORK}/github_output"
+}
+
+describe "the preflight publishes what it deployed"
+# These are a contract now: consumers gate CDN purges and delete-tripwires on
+# them, and removing or renaming one is a major bump.
+assert_eq '["site.com"]' "$(pf_output web-roots)" "web-roots is a JSON array"
+assert_eq '["a.com","b.com"]' "$(pf_output web-roots "WEB_ROOT_DIRS=a.com
+b.com")" "several roots, JSON, no trailing comma"
+assert_eq "2" "$(pf_output web-root-count "WEB_ROOT_DIRS=a.com
+b.com")" "web-root-count matches"
+assert_eq "true" "$(pf_output app-deployed)" "app-deployed is true by default"
+assert_eq "false" "$(pf_output app-deployed DEPLOY_APP_DIR=false)" "app-deployed follows the input"
+assert_eq "app" "$(pf_output app-remote-dir)" "app-remote-dir defaults to app-dir"
+assert_eq "private" "$(pf_output app-remote-dir APP_REMOTE_DIR=private)" "app-remote-dir follows the input"
+# Normalized, not raw: the outputs must agree with what the rsync steps use.
+assert_eq '["site.com"]' "$(pf_output web-roots "WEB_ROOT_DIRS=./site.com/")" "web-roots is normalized"
+
+describe "no output is derived from a secret"
+# base-dir, host and user are secrets. An output built from them would be
+# stored and readable through the API, and a value concatenated from a secret
+# and a non-secret may not be masked at all.
+# Asserted against the WHOLE emitted block, not one key: a leak would most
+# likely arrive in a field nobody thought to check.
+leaked() {
+  preflight >/dev/null 2>&1 || true
+  grep -cE '/home/user|host\.example\.com|^[^=]*=user$' "${WORK}/github_output" || true
+}
+assert_eq "0" "$(leaked)" "no output contains base-dir, host or user"
+
+describe "deploy-app-dir must be exactly true or false"
+# The step condition that runs the app sync uses GitHub's `==`, which is
+# case-INSENSITIVE, while every reader in this shell uses POSIX `[ = ]`, which
+# is not. 'True' therefore made the shell skip reject_repo_root,
+# check_relative_dir, the app-inside-public checks and the app-inside-web-root
+# loop, while the gate still ran the sync - publishing the private tree into a
+# served web root, or running --delete outside the account home.
+assert_exit 1 "'True' is refused" preflight DEPLOY_APP_DIR=True
+assert_output_contains "must be exactly" "the refusal explains the rule" \
+  preflight DEPLOY_APP_DIR=True
+assert_exit 1 "'TRUE' is refused" preflight DEPLOY_APP_DIR=TRUE
+assert_exit 1 "'False' is refused" preflight DEPLOY_APP_DIR=False
+assert_exit 1 "'yes' is refused" preflight DEPLOY_APP_DIR=yes
+assert_exit 1 "an empty value is refused" preflight DEPLOY_APP_DIR=
+assert_exit 0 "'true' is accepted" preflight DEPLOY_APP_DIR=true
+assert_exit 0 "'false' is accepted" preflight DEPLOY_APP_DIR=false
+# The case that made it dangerous: a spelling the gate accepts must never reach
+# the app checks unvalidated.
+assert_exit 1 "'True' with a nested app-remote-dir is still refused" \
+  preflight DEPLOY_APP_DIR=True APP_REMOTE_DIR=site.com/app
+assert_exit 1 "'True' with an escaping app-remote-dir is still refused" \
+  preflight DEPLOY_APP_DIR=True APP_REMOTE_DIR=../shared
+
+describe "a web root must not break the web-roots JSON"
+# The JSON is built by hand and asserts these cannot occur. Until this was
+# validated, 'my"site.com' produced ["my"site.com"] - rejected by a consumer's
+# fromJSON() only AFTER both rsyncs had written and deleted.
+assert_exit 1 "a double quote is refused" preflight 'WEB_ROOT_DIRS=my"site.com'
+assert_output_contains "double quote" "the quote is named" preflight 'WEB_ROOT_DIRS=my"site.com'
+assert_exit 1 "a backslash is refused" preflight 'WEB_ROOT_DIRS=a\b.com'
+assert_output_contains "backslash" "the backslash is named" preflight 'WEB_ROOT_DIRS=a\b.com'
 
 describe "the environment input must be present"
 # Not a formality. `required: true` on an action input is advisory - the runner

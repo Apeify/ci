@@ -440,8 +440,13 @@ that cannot fail is worse than no test, and this suite has twice been found
 green against an `action.yml` with a guard removed. The check is mechanical:
 
 ```bash
-mkdir -p /tmp/mut && tar --exclude=node_modules --exclude=.git -cf - . | (cd /tmp/mut && tar -xf -)
+mkdir -p /tmp/mut && tar --exclude=node_modules -cf - . | (cd /tmp/mut && tar -xf -)
 ```
+
+Note `.git` is copied, not excluded. The preflight reads `git rev-parse HEAD`
+to publish `deployed-sha`, so a copy without it fails every success-path
+assertion with "not a git repository" - 74 failures that say nothing about the
+mutation you were testing.
 
 Then, inside the copy, delete one `check_relative_dir` or `reject_repo_root`
 call, or one `case` in the web-root overlap loop, and run `bash tests/run.sh`.

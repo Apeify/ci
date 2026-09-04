@@ -247,6 +247,60 @@ disagree, so what you see here is always what is in `examples/`.
 #   app-excludes     rsync excludes for app-dir, ONE PER LINE. Use for
 #                    server-managed state or server-only config that a deploy
 #                    must not overwrite.
+#
+# OUTPUTS the deploy action publishes. Give the step an `id:` - this stub uses
+# `id: deploy` - and read `steps.deploy.outputs.<name>` from a LATER STEP OF
+# THIS JOB. Step outputs do not cross jobs on their own; re-export one as a job
+# output if another job needs it.
+#
+# Every value is a STRING. $GITHUB_OUTPUT is a text file and an action has no
+# `type:` key, so there is nowhere for a real type to travel. That matters in
+# exactly one place: ALWAYS compare a boolean-ish output against 'true'. An
+# `if:` that reads one bare is ALWAYS TRUE, because only an empty string is
+# falsy and 'false' is not empty.
+#
+# Numbers need no such care. A comparison coerces a string operand to a number,
+# so `steps.deploy.outputs.paths-deleted > 50` works as written, and an empty
+# value coerces to 0 rather than failing. fromJSON() is for web-roots, where it
+# decodes structure - it is not needed to compare a count.
+#
+# They are set on the SUCCESS PATH ONLY. A failing step stops the action and
+# leaves every output unset, so read them for what happened, never for why
+# something did not. Nothing derived from a secret is published. Full
+# descriptions are in the README's Outputs section.
+#
+#   deployed-sha     The commit this deploy shipped. A smoke check can assert
+#                    the live site reports it, instead of sleeping and hoping
+#                    opcache noticed.
+#   pipeline-ref     The ref this action resolved at, from the `uses:` below. A
+#                    SHA when pinned, the branch name when tracking one.
+#
+#   web-roots        JSON array of the web root names written to. fromJSON() it
+#                    to loop, or to feed a matrix.
+#   web-root-count   How many.
+#   app-deployed     'true' unless deploy-app-dir turned the private sync off.
+#   app-remote-dir   That tree's name ON THE SERVER, empty when it was skipped.
+#                    A name and not a path, because base-dir is a secret.
+#
+#   changed          'true' if anything transferred or was deleted, in either
+#                    sync. Gate a CDN purge or a notification on it. It follows
+#                    rsync's transferred-file count, so a deploy that changed
+#                    only mtimes or permissions reports false.
+#   public-changed   The same, for the public sync alone.
+#   app-changed      The same, for the app sync. Empty when it was skipped.
+#   files-transferred, bytes-transferred
+#                    Totals, summed across every web root and the app sync.
+#   paths-deleted    Paths removed by --delete, summed the same way. One per
+#                    deleted file AND one per deleted directory, so removing a
+#                    directory of three files counts four. The only hook on the
+#                    destructive half, but post-hoc: the paths are already gone
+#                    when it exists, so a check on it fails the run after the
+#                    fact rather than refusing the deploy.
+#   host-key-pinned  'false' when the deploy fell back to ssh-keyscan rather
+#                    than a pinned DEPLOY_HOST_KEY. Fail your own build on it
+#                    if production must never deploy over trust-on-first-use.
+#   started-at, finished-at, duration-seconds
+#                    UTC ISO 8601 timestamps, and the wall time between them.
 # =========================================================================
 name: Deploy site
 
@@ -293,7 +347,11 @@ jobs:
           # Full history, so the mtime restore can date every file.
           fetch-depth: 0
 
+      # `id:` so later steps in this job can read what the deploy did - see
+      # the OUTPUTS block above. Nothing below needs it yet; it costs a line
+      # and saves rewriting the step later.
       - uses: Apeify/ci/actions/deploy@main
+        id: deploy
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
@@ -314,6 +372,25 @@ jobs:
           app-excludes: |
             cache/
             config/mail.php
+
+      # Post-deploy steps go HERE, in this job, after the action. That is
+      # possible because the deploy is an action rather than a reusable
+      # workflow: a job calling a workflow cannot carry steps at all, so there
+      # would be nowhere to put a smoke check, a cache purge, or a notification.
+      #
+      # A worked example, commented out because every site's is different:
+      #
+      #   - name: Purge the CDN, but only if anything actually moved
+      #     if: steps.deploy.outputs.changed == 'true'
+      #     shell: bash
+      #     run: curl -fsS -X POST "$PURGE_URL"
+      #
+      #   - name: Refuse a deploy that removed more than expected
+      #     if: steps.deploy.outputs.paths-deleted > 50
+      #     run: |
+      #       n='${{ steps.deploy.outputs.paths-deleted }}'
+      #       echo "::error::$n paths deleted - check before re-running."
+      #       exit 1
 ```
 
 ### `.github/workflows/promote.yml`
@@ -537,6 +614,70 @@ no usable default and the deploy refuses without them:
 | `deploy-app-dir` | `'true'` | Set `'false'` for a site with no private directory; all `app-*` inputs are then ignored. A string, not a boolean |
 | `public-excludes` | `dev-router.php`, `router.php`, `.well-known` | rsync excludes for the public directory, **one per line**. Supplying this **replaces** the default |
 | `app-excludes` | *(empty)* | rsync excludes for the app directory, **one per line**. Use for server-managed state or server-only config |
+
+### Outputs
+
+`actions/deploy` publishes what it did, so a consumer can act on it without
+scraping the log. Give the step an `id:` and read `steps.<id>.outputs.<name>`
+later in the same job.
+
+| Output | Meaning |
+|---|---|
+| `deployed-sha` | The commit this deploy shipped |
+| `pipeline-ref` | The ref the action resolved at, from your `uses:` |
+| `web-roots` | JSON array of the web root names written to |
+| `web-root-count` | How many |
+| `app-deployed` | `'true'` unless `deploy-app-dir` turned it off |
+| `app-remote-dir` | The private tree's name on the server. A name, not a path |
+| `changed` | `'true'` if anything transferred or was deleted, either sync |
+| `public-changed` / `app-changed` | The same, per half. `app-changed` is empty when that sync was skipped |
+| `files-transferred`, `bytes-transferred` | Totals, summed across every web root and the app sync |
+| `paths-deleted` | Paths removed by `--delete`, summed the same way. One per deleted file **and** one per deleted directory |
+| `host-key-pinned` | `'false'` when the deploy fell back to `ssh-keyscan` |
+| `started-at`, `finished-at`, `duration-seconds` | Timing |
+
+Four things to know before relying on them.
+
+**They are set on the success path only.** If a step fails the action stops and
+every output is unset, so read them for what happened, never for why something
+did not.
+
+**Nothing derived from a secret is published.** `base-dir`, `host` and `user` are
+secrets, so the rsync destination and the account path stay in the log, where
+masking applies. That is why `app-remote-dir` is a bare name and there is no
+"deployed to" output.
+
+**To use one in a different job**, re-export it as a job output; step outputs do
+not cross jobs on their own.
+
+**Every value is a string**, and there is nowhere for a real type to travel:
+`$GITHUB_OUTPUT` is a text file, and an action has no `type:` key the way a
+`workflow_call` input does. In practice that matters in exactly one place -
+always compare a boolean-ish output against `'true'`. An `if:` that reads one
+bare is *always* true, because only an empty string is falsy and `'false'` is
+not empty:
+
+```yaml
+if: steps.deploy.outputs.changed             # ALWAYS TRUE - bug
+if: steps.deploy.outputs.changed == 'true'   # correct
+```
+
+Numbers need no such care. A comparison coerces a string operand to a number, so
+`steps.deploy.outputs.paths-deleted > 50` works as written, and an empty value
+coerces to `0` rather than failing. `fromJSON()` is for `web-roots`, where it
+decodes structure; it is not needed to compare a count.
+
+Two uses worth calling out. `paths-deleted` is the tripwire: `--delete` is the
+destructive half and this is the only hook on it. It counts one path per deleted
+file and one per deleted directory, so removing a directory of three files counts
+four - deliberately, since the job is to notice everything that went. It is
+post-hoc, though: the paths are already gone when the output exists, so a site
+fails the run after a deploy that removed more than expected rather than
+refusing one.
+
+And `deployed-sha` lets a smoke check assert the live site is serving *that*
+commit, which is a positive check rather than sleeping and hoping opcache
+noticed.
 
 ### More than two environments (Disaster Recovery, preview)
 
