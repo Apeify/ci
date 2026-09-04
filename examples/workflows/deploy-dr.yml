@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
     with:
       environment: dr
 
@@ -58,7 +58,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Apeify/ci/actions/deploy@main
+      - uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}

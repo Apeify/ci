@@ -42,24 +42,49 @@ That definition is doing real work, because a consumer pinned to a SHA gets a
 Dependabot PR either way - the version comment beside the pin is the only signal
 telling them whether it needs reading before merging.
 
-### At tag time, update [`examples/workflows/`](examples/workflows/)
+### Re-pin [`examples/workflows/`](examples/workflows/) when convenient
 
-Those stubs currently say `@main`, which is the one place in this repo that
-teaches the opposite of the advice in
-[Versioning](README.md#versioning). Once a tag exists they should show the
-SHA-pinned form with a version comment, so the copyable artifact matches the
-convention it documents.
+The stubs ship SHA-pinned with a version comment rather than tracking `@main`,
+because a consumer copies them verbatim and whatever they say is what that site
+runs. Leaving them on a branch would hand every new site an unpinned pipeline
+while the README told them to pin, and would leave
+[`examples/dependabot.yml`](examples/dependabot.yml) with nothing to do: a bump
+needs a tagged release to compare against, and against a branch Dependabot may
+move the pin to an untagged HEAD while leaving a version comment that is now
+wrong.
 
-Editing them will fail the README-matches-examples check until the README blocks
-are regenerated from the files - which is the reminder that both need updating.
+The pin they carry is always at least one release behind, and that is inherent
+rather than an oversight: pointing a stub at a tag takes a commit, and that
+commit is not in the tag. Chasing it is a treadmill with no end state, so do not
+try. The tags exist for the shared action code, which is what consumers actually
+resolve; the stub is a starting point, and a starting point one version back
+still deploys correctly and gets a Dependabot PR on day one.
 
-The first tag is also what makes [`examples/dependabot.yml`](examples/dependabot.yml)
-useful. Dependabot can only offer a version bump when the pinned commit is
-reachable from a tag; against a branch there is nothing to compare, and it may
-move the pin to an untagged branch HEAD while leaving a version comment that is
-now wrong. Until the tag exists, that example describes something consumers
-cannot yet benefit from - which is another reason not to leave the stubs on
-`@main` indefinitely.
+So re-pin the five `uses: Apeify/ci` lines across the three files whenever the
+repo is being touched anyway - typically alongside the next release - and let it
+drift in between. A stub on `@main` teaches the wrong thing permanently; a stub
+a version or two back costs nothing.
+
+Take the SHA from the commit, not the tag object. Tags here are annotated, so
+`git rev-parse v2.1.0` returns the TAG OBJECT, which will not run:
+
+```bash
+git rev-list -n 1 v2.1.0
+```
+
+`rev-list` rather than `git rev-parse v2.1.0^{commit}` because it has no `^` or
+`{}` to be eaten by a shell. Unquoted in PowerShell that second form is
+**silently wrong**: `{commit}` is taken as a script block, git gets a bare
+`v2.1.0^`, and it prints the tag's PARENT - a real SHA for the previous release,
+with no error to warn you.
+
+Use the full 40 characters, matching what Dependabot writes.
+
+Editing the stubs will fail the README-matches-examples check until the README
+blocks are regenerated from the files - which is the reminder that both need
+updating. The pinned SHA is also quoted in the README's
+[Versioning](README.md#versioning) section, outside any example block, so that
+copy needs bumping by hand.
 
 ### Testing a change before tagging
 

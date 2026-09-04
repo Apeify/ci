@@ -186,7 +186,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 
   deploy:
     needs: lint-and-test
@@ -208,7 +208,7 @@ jobs:
       # `id:` so later steps in this job can read what the deploy did - see
       # the OUTPUTS block above. Nothing below needs it yet; it costs a line
       # and saves rewriting the step later.
-      - uses: Apeify/ci/actions/deploy@main
+      - uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
         id: deploy
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}

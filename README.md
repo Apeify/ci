@@ -328,7 +328,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 
   deploy:
     needs: lint-and-test
@@ -350,7 +350,7 @@ jobs:
       # `id:` so later steps in this job can read what the deploy did - see
       # the OUTPUTS block above. Nothing below needs it yet; it costs a line
       # and saves rewriting the step later.
-      - uses: Apeify/ci/actions/deploy@main
+      - uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
         id: deploy
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
@@ -463,7 +463,7 @@ jobs:
     permissions:
       contents: write # fast-forward and push `main`
       actions: write # dispatch the deploy workflow
-    uses: Apeify/ci/.github/workflows/promote.yml@main
+    uses: Apeify/ci/.github/workflows/promote.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
     secrets: inherit
 ```
 
@@ -511,7 +511,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@main
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
     with:
       environment: dr
 
@@ -539,7 +539,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Apeify/ci/actions/deploy@main
+      - uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
@@ -1031,12 +1031,35 @@ run time. Commits can accumulate on `main` here without affecting any consumer
 until their pin moves.
 
 For production sites, pin by **commit SHA** with a version comment, the same way
-actions are pinned:
+actions are pinned. The stubs under [`examples/`](examples/) already ship this
+way, so a fresh copy starts pinned rather than tracking a branch:
 
 ```yaml
-uses: Apeify/ci/.github/workflows/lint-and-test.yml@a1b2c3d # v1.2.0
-uses: Apeify/ci/actions/deploy@a1b2c3d                      # v1.2.0
+uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
+uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 ```
+
+Use the full 40-character SHA, which is what Dependabot writes and what the
+`actions/checkout` pin in the same stub already uses.
+
+**Getting that SHA: ask for the commit, not the tag.** Tags here are annotated,
+so a tag name resolves to a *tag object* rather than to a commit, and pinning
+that object gives `Unable to resolve action` on the next run:
+
+```bash
+git rev-list -n 1 v2.1.0        # 075bf4b... the commit - this is the pin
+git rev-parse v2.1.0            # dda31b4... the TAG OBJECT - will not run
+```
+
+`rev-list` is the form to use because it has no `^` or `{}` for a shell to
+mangle. The `git rev-parse v2.1.0^{commit}` spelling is correct in bash but
+**silently wrong in PowerShell**, which reads `{commit}` as a script block and
+leaves git with a bare `v2.1.0^` - meaning the PARENT of the tag. It prints a
+valid-looking SHA that is the previous release. Quote it (`"v2.1.0^{commit}"`)
+or use `rev-list`.
+
+Dependabot is not affected by this; it resolves annotated tags to the commit
+correctly, so only hand-written pins need this at all.
 
 A moving `@v1` tag is the other common convention, but it is a mutable ref: one
 bad commit reaches every consumer at once. A SHA pin plus Dependabot gives the
@@ -1087,8 +1110,8 @@ is a different directory for a different thing.
 # The deploy and promote stubs pin the shared pipeline to a commit SHA with a
 # version comment beside it:
 #
-#   uses: Apeify/ci/actions/deploy@<sha>                   # v1.4.0
-#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v1.4.0
+#   uses: Apeify/ci/actions/deploy@<sha>                      # v2.1.0
+#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v2.1.0
 #
 # A pin is what stops a change in the shared repo from reaching this site
 # without anyone deciding it should. The cost is that the pin then has to be
@@ -1166,9 +1189,11 @@ site's own dependencies; add a second `updates:` entry if the repo grows a
 
 Dependabot can only offer a version bump when it has a newer version to compare
 against, which means the pin has to be a tagged release rather than a branch.
-While a stub tracks `@main` there is nothing for it to do. Pin to a tagged SHA
-before relying on this file, and keep the version comment beside the pin - it is
-what tells you, in the diff, whether you are looking at a major bump.
+The stubs under [`examples/`](examples/) ship pinned to a tag for that reason,
+so a copy works with this file from the first commit. If you change a pin back
+to `@main`, this file has nothing to do. Keep the version comment beside the
+pin, too - it is what tells you, in the diff, whether you are looking at a major
+bump.
 
 ## Working on the pipeline itself
 
