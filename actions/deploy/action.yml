@@ -43,8 +43,16 @@ inputs:
   web-root-dirs:
     description: >-
       Web-root directory NAMES, one per line, each relative to base-dir. Pass
-      `${{ vars.WEB_ROOT_DIRS }}`. It is an input rather than read from `vars`
-      because a composite action cannot access that context at all.
+      the caller's WEB_ROOT_DIRS variable in. It is an input rather than read
+      from the vars context because a composite action cannot reach that
+      context at all.
+
+      Note this names the variable instead of showing the expression, and that
+      is not squeamishness. GitHub evaluates expressions in action METADATA,
+      descriptions included, against a context set that excludes vars - so the
+      literal expression here made the entire action fail to load with
+      "Unrecognized named-value: 'vars'" before a single step ran. The
+      description caused the very problem it was describing.
     required: true
 
   # ------------------------------------------------------------ credentials

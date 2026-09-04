@@ -348,6 +348,51 @@ covered automatically. The local task uses `find` instead, and that difference
 is deliberate rather than an oversight: locally you want a script checked while
 you are still writing it, before it has ever been staged.
 
+### 4b. No expressions in action metadata
+
+[`scripts/check-action-metadata.sh`](scripts/check-action-metadata.sh) rejects
+GitHub expressions anywhere in an action file except under `runs:` and in
+`outputs.<name>.value`, and checks that the contexts those values use are ones a
+composite action can actually resolve.
+
+It exists because of a failure that reached a live deploy. This shipped:
+
+```yaml
+  web-root-dirs:
+    description: >-
+      ... Pass `[expression]`. It is an input rather than read from vars
+      because a composite action cannot access that context at all.
+```
+
+and every consumer failed with `Unrecognized named-value: 'vars'` before a
+single step ran. GitHub evaluates expressions in action METADATA, descriptions
+included, against a context set that excludes `vars` - so the sentence
+explaining that `vars` is unavailable was itself unavailable.
+
+**Nothing else could have caught it.** actionlint cannot read composite actions.
+The layer-1 extractor parses the YAML and checks `runs.using` and `shell:`, but
+a description containing an expression is perfectly valid YAML. The test suite
+drives extracted shell and never sees metadata. The class had zero coverage
+across all five layers, which is exactly how it reached a deploy.
+
+**It parses the YAML, and the first version's failure is worth recording.** That
+one scanned lines: metadata was everything above `^runs:`, and an expression was
+allowed on any line matching `^    value: `. A review found four bypasses and
+three false positives in it. YAML mappings are unordered, so moving `outputs:`
+below `runs:` - the natural order, since output values reference step ids - hid a
+fatal expression entirely. A prose line inside a block scalar reading
+`value: ...` was exempted. Greedy matching read only the last expression on a
+line. And it rejected a folded `value: >-`, any four-space-indented action, and
+any output using `fromJSON()` or `format()`.
+
+Structure cannot be recovered from line shapes. Parsing costs a js-yaml
+dependency - which is why it runs after the extractor step that installs it,
+rather than before the downloads as an earlier version of this section claimed.
+
+[`tests/action-metadata.test.sh`](tests/action-metadata.test.sh) covers all seven
+of those cases as fixtures, because the failures are about YAML shape, which a
+mutation of one well-formed file cannot reach.
+
 ### 5. The test suite in [`tests/`](tests/)
 
 Layers 1 to 4 all ask whether the code is well-formed. This one asks whether it
@@ -426,7 +471,7 @@ Open the repo in VS Code and choose **Reopen in Container**
 and the same pinned actionlint that CI uses.
 
 Then press **Ctrl+Shift+B**, or Terminal → Run Task → **Validate all**.
-[`.vscode/tasks.json`](.vscode/tasks.json) defines four check tasks plus the
+[`.vscode/tasks.json`](.vscode/tasks.json) defines five check tasks plus the
 chain that runs them:
 
 | Task | Runs |
@@ -434,8 +479,9 @@ chain that runs them:
 | Validate workflows and examples | [`scripts/lint-workflows.sh`](scripts/lint-workflows.sh) - `actionlint` over every workflow |
 | Check README matches examples | `scripts/check-readme-examples.sh` |
 | Shellcheck scripts | `shellcheck` over every `*.sh` in the working tree |
+| Check action metadata | [`scripts/check-action-metadata.sh`](scripts/check-action-metadata.sh) - no expressions in action metadata |
 | Run tests | [`tests/run.sh`](tests/run.sh) - the behavior suite |
-| **Validate all** | all four, in order (the default build task) |
+| **Validate all** | all five, in order (the default build task) |
 
 Or directly:
 

@@ -1,0 +1,38 @@
+# Force LF in the working tree, on every platform.
+#
+# WHY THIS EXISTS
+#
+# Without it, a clone on a machine with `core.autocrlf=true` - the Windows Git
+# default - gets CRLF working-tree copies of everything git rewrites. That is
+# not cosmetic here:
+#
+#   * shellcheck rejects a CRLF script outright (SC1017), so the local
+#     "Shellcheck scripts" task fails on a clean checkout while CI passes,
+#     because a Linux runner checks out LF regardless. A check that disagrees
+#     with CI depending on who ran it is worse than no check.
+#   * `#!/usr/bin/env bash\r` is not a valid shebang on Linux. These scripts are
+#     run explicitly as `bash script.sh` today, which hides it - but anything
+#     that ever executes one directly gets "bad interpreter: no such file".
+#   * A CRLF `action.yml` is read by GitHub without complaint, and then every
+#     `run:` block it contains carries trailing carriage returns into the shell.
+#
+# This was not theoretical: the working tree on Windows held CRLF copies and
+# the shellcheck layer started failing locally while CI stayed green.
+#
+# `text=auto eol=lf` means: decide what is text by inspection, normalize it to
+# LF in the repository, and check it out as LF everywhere. Nothing here is
+# Windows-native and nothing needs CRLF.
+#
+# This repository never committed CRLF - the blobs have been LF throughout, and
+# only the checked-out copies were converted, so `git add --renormalize .` here
+# is a no-op. Run it after adding this file to a repo that did commit CRLF; to
+# fix a working tree that already has it, re-checkout the affected files.
+* text=auto eol=lf
+
+# Binary, so git does not attempt any conversion.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -70,6 +70,16 @@
 			"problemMatcher": []
 		},
 		{
+			// Rejects GitHub expressions in action METADATA. They are evaluated
+			// at load time against a context set that excludes vars, so a
+			// description merely mentioning one takes the whole action down.
+			// actionlint cannot read composite actions, so nothing else covers it.
+			"label": "Check action metadata",
+			"type": "shell",
+			"command": "bash scripts/check-action-metadata.sh",
+			"problemMatcher": []
+		},
+		{
 			// Extracts the shell from actions/deploy/action.yml and runs it
 			// against known-good and known-bad configurations. The only check
 			// here that tests BEHAVIOR rather than form, and the only one that
@@ -84,7 +94,7 @@
 			// Everything, in order. Ctrl+Shift+B.
 			//
 			// dependsOrder is "sequence" rather than the default parallel so the
-			// output stays readable: four checks interleaving into one terminal
+			// output stays readable: five checks interleaving into one terminal
 			// is hard to attribute.
 			"label": "Validate all",
 			"dependsOrder": "sequence",
@@ -92,6 +102,7 @@
 				"Validate workflows and examples",
 				"Check README matches examples",
 				"Shellcheck scripts",
+				"Check action metadata",
 				"Run tests"
 			],
 			"group": {

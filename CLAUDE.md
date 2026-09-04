@@ -56,13 +56,14 @@ Open in VS Code and choose **Reopen in Container** ([.devcontainer/](.devcontain
 installs `shellcheck`, Node, and the same pinned `actionlint` CI uses.
 
 Run the checks with **Ctrl+Shift+B** (Terminal -> Run Task -> **Validate all**), which chains the
-four check tasks defined in [.vscode/tasks.json](.vscode/tasks.json) (the fifth label there is
+five check tasks defined in [.vscode/tasks.json](.vscode/tasks.json) (the sixth label there is
 `Validate all` itself):
 
 ```bash
 bash scripts/lint-workflows.sh                      # schema, expressions, embedded shell
 bash scripts/check-readme-examples.sh               # README blocks match examples/
 shellcheck -x --source-path=SCRIPTDIR <every *.sh>  # standalone scripts
+bash scripts/check-action-metadata.sh               # no expressions in action metadata
 bash tests/run.sh                                   # behavior of the shell in the deploy action
 ```
 
