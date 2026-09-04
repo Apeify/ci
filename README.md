@@ -304,6 +304,27 @@ disagree, so what you see here is always what is in `examples/`.
 # =========================================================================
 name: Deploy site
 
+# What the Actions tab lists this run as. Without it every run reads "Deploy
+# site", so a production publish is indistinguishable from an ordinary staging
+# push in the list - and the publish arrives as a SEPARATE run, named the same
+# as the one that triggered nothing.
+#
+# This restates the branch mapping that lint-and-test.yml owns. That
+# duplication is deliberate and unavoidable: `run-name` is evaluated BEFORE any
+# job starts, so it cannot read `needs.lint-and-test.outputs.environment` the
+# way `environment:` below does. Its contexts are `github` and `inputs` only.
+#
+# It is a LABEL, never a target. If the mapping ever changed, this would print
+# the wrong word in a list; it could not deploy to the wrong host, because
+# `environment:` still derives the real one from the shared output.
+#
+# A stub that passes an `environment:` OVERRIDE must not copy this line. The
+# override wins over the branch and this expression cannot see it, so it would
+# mislabel every run. Hardcode the name there instead - see deploy-dr.yml.
+run-name: >-
+  Deploy site to
+  ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
 on:
   push:
     # staging only. `main` is intentionally absent, so pushing to main deploys
@@ -499,6 +520,12 @@ Only for a site with a third target - see
 # point here, since no branch maps to `dr`.
 # =========================================================================
 name: Deploy to DR
+
+# Deliberately no `run-name:` expression. deploy.yml carries one that derives
+# production/staging from the branch, and that expression cannot see the
+# `environment:` override below - which wins over the branch - so copying it
+# here would label every DR run "staging". This stub has exactly one target and
+# the workflow name already says which, so there is nothing to derive.
 
 on:
   # Manual only. A DR target exists for the day the primary host is gone, so it

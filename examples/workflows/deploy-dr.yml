@@ -19,6 +19,12 @@
 # =========================================================================
 name: Deploy to DR
 
+# Deliberately no `run-name:` expression. deploy.yml carries one that derives
+# production/staging from the branch, and that expression cannot see the
+# `environment:` override below - which wins over the branch - so copying it
+# here would label every DR run "staging". This stub has exactly one target and
+# the workflow name already says which, so there is nothing to derive.
+
 on:
   # Manual only. A DR target exists for the day the primary host is gone, so it
   # is deployed deliberately rather than on a push.
