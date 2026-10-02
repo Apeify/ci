@@ -1259,7 +1259,8 @@ describe the *calling* workflow in the site repo.
 A **major** bump is any change that requires you to act - a new required input,
 a renamed secret or variable you must create, a changed server layout. Anything
 else is minor or patch, and the version comment beside the pin is what tells you
-which kind of Dependabot PR you are looking at.
+which kind of Dependabot PR you are looking at. [CHANGELOG.md](CHANGELOG.md) lists every release,
+and each major one says exactly what to change in your stubs.
 
 ### Keeping the pin current with Dependabot
 

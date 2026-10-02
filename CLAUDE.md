@@ -11,7 +11,8 @@ pipeline, written once, consumed by every site repo.
 Three docs, three audiences. [README.md](README.md) is the contract consumers read - what to
 configure and what the pipeline does. [MAINTAINING.md](MAINTAINING.md) is for working *on* the
 pipeline: releasing, local validation, and the reasoning behind the design. This file is the house
-rules for editing the repo.
+rules for editing the repo. [CHANGELOG.md](CHANGELOG.md) records each release, and for a major
+one, exactly what a consumer must change.
 
 ## How to collaborate here
 
@@ -123,6 +124,9 @@ Two properties are load-bearing and easy to break by accident:
 
 ## Conventions
 
+- **A major release is not finished without a Migrating section in
+  [CHANGELOG.md](CHANGELOG.md).** Add the release's entry in the same change that makes it major,
+  not at tag time, so the note is reviewed with the code it describes.
 - **Never use an em dash (U+2014) or en dash (U+2013)** in code, comments, or documentation. Any
   time one is needed, a regular dash (-) will do.
 - **Use American spelling, never British.** `behavior` not `behaviour`, `normalize` not `normalise`,

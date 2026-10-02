@@ -19,11 +19,11 @@ newline-separated-lists rule - are in [CLAUDE.md](CLAUDE.md).
 
 ## Releasing
 
-Branch → PR → merge to `main` → tag. Consumers move when their pin is bumped,
-which Dependabot will offer automatically. There is no publish step and no
-registry: a tag is just a git ref, and GitHub fetches whatever ref a consumer's
-`uses:` line names at run time. Commits can accumulate on `main` here without
-affecting anyone until their pin moves.
+Branch → PR → merge to `main` → tag. The branch carries its own [CHANGELOG.md](CHANGELOG.md)
+entry, so the note is reviewed with the code it describes. Consumers move when their pin is bumped,
+which Dependabot will offer automatically. There is no publish step and no registry: a tag is just
+a git ref, and GitHub fetches whatever ref a consumer's `uses:` line names at run time. Commits can
+accumulate on `main` here without affecting anyone until their pin moves.
 
 ### What "major" means here
 
@@ -36,7 +36,10 @@ That last clause exists because the first release to carry it is one the earlier
 definition did not describe: `deploy.yml` was deleted and every consumer has to
 rewrite a one-job stub into two. A pin bump alone gives them "workflow was not
 found" on their next push. Any release like that needs a migration note saying
-so, not just a version number.
+so, not just a version number: a **Migrating** section in [CHANGELOG.md](CHANGELOG.md) listing
+exactly what to change in a site repo. Dependabot shows that file's matching section in the pull
+request that bumps a consumer's pin, which is the moment they need it. Paste the same section into
+the GitHub release.
 
 That definition is doing real work, because a consumer pinned to a SHA gets a
 Dependabot PR either way - the version comment beside the pin is the only signal
