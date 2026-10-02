@@ -381,10 +381,10 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
 
   minify:
-    uses: Apeify/ci/.github/workflows/minify.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/minify.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
 
   deploy:
     needs: [lint-and-test, minify]
@@ -406,7 +406,7 @@ jobs:
       # `id:` so later steps in this job can read what the deploy did - see
       # the OUTPUTS block above. Nothing below needs it yet; it costs a line
       # and saves rewriting the step later.
-      - uses: Apeify/ci/actions/deploy@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+      - uses: Apeify/ci/actions/deploy@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
         id: deploy
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
@@ -536,7 +536,7 @@ jobs:
     # `secrets: inherit` would add nothing it uses, and would hand every
     # repository and organization secret to shared code that has no use for
     # them.
-    uses: Apeify/ci/.github/workflows/promote.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/promote.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
 ```
 
 The `name:` in the stub is what appears in the consuming repo's Actions sidebar,
@@ -589,12 +589,12 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
     with:
       environment: dr
 
   minify:
-    uses: Apeify/ci/.github/workflows/minify.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/minify.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
     # If deploy.yml sets public-dir on ITS minify job, set the same value here.
     # The deploy refuses minified assets made from a different directory, and
     # this stub is the one nobody runs until the day it matters.
@@ -623,7 +623,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Apeify/ci/actions/deploy@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+      - uses: Apeify/ci/actions/deploy@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
@@ -1217,9 +1217,9 @@ actions are pinned. The stubs under [`examples/`](examples/) already ship this
 way, so a fresh copy starts pinned rather than tracking a branch:
 
 ```yaml
-uses: Apeify/ci/.github/workflows/lint-and-test.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
-uses: Apeify/ci/.github/workflows/minify.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
-uses: Apeify/ci/actions/deploy@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+uses: Apeify/ci/.github/workflows/lint-and-test.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
+uses: Apeify/ci/.github/workflows/minify.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
+uses: Apeify/ci/actions/deploy@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
 ```
 
 Use the full 40-character SHA, which is what Dependabot writes and what the
@@ -1230,15 +1230,15 @@ so a tag name resolves to a *tag object* rather than to a commit, and pinning
 that object gives `Unable to resolve action` on the next run:
 
 ```bash
-git rev-list -n 1 v3.0.1        # c41a8a6... the commit - this is the pin
-git rev-parse v3.0.1            # 8994353... the TAG OBJECT - will not run
+git rev-list -n 1 v3.1.0        # fc438c1... the commit - this is the pin
+git rev-parse v3.1.0            # 9036538... the TAG OBJECT - will not run
 ```
 
 `rev-list` is the form to use because it has no `^` or `{}` for a shell to
-mangle. The `git rev-parse v3.0.1^{commit}` spelling is correct in bash but
+mangle. The `git rev-parse v3.1.0^{commit}` spelling is correct in bash but
 **silently wrong in PowerShell**, which reads `{commit}` as a script block and
-leaves git with a bare `v3.0.1^` - meaning the PARENT of the tag. It prints a
-valid-looking SHA for the commit before the release. Quote it (`"v3.0.1^{commit}"`)
+leaves git with a bare `v3.1.0^` - meaning the PARENT of the tag. It prints a
+valid-looking SHA for the commit before the release. Quote it (`"v3.1.0^{commit}"`)
 or use `rev-list`.
 
 Dependabot is not affected by this; it resolves annotated tags to the commit
@@ -1294,8 +1294,8 @@ is a different directory for a different thing.
 # The deploy and promote stubs pin the shared pipeline to a commit SHA with a
 # version comment beside it:
 #
-#   uses: Apeify/ci/actions/deploy@<sha>                      # v3.0.1
-#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v3.0.1
+#   uses: Apeify/ci/actions/deploy@<sha>                      # v3.1.0
+#   uses: Apeify/ci/.github/workflows/lint-and-test.yml@<sha> # v3.1.0
 #
 # A pin is what stops a change in the shared repo from reaching this site
 # without anyone deciding it should. The cost is that the pin then has to be

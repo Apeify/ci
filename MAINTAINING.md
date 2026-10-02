@@ -69,16 +69,16 @@ drift in between. A stub on `@main` teaches the wrong thing permanently; a stub
 a version or two back costs nothing.
 
 Take the SHA from the commit, not the tag object. Tags here are annotated, so
-`git rev-parse v3.0.1` returns the TAG OBJECT, which will not run:
+`git rev-parse v3.1.0` returns the TAG OBJECT, which will not run:
 
 ```bash
-git rev-list -n 1 v3.0.1
+git rev-list -n 1 v3.1.0
 ```
 
-`rev-list` rather than `git rev-parse v3.0.1^{commit}` because it has no `^` or
+`rev-list` rather than `git rev-parse v3.1.0^{commit}` because it has no `^` or
 `{}` to be eaten by a shell. Unquoted in PowerShell that second form is
 **silently wrong**: `{commit}` is taken as a script block, git gets a bare
-`v3.0.1^`, and it prints the tag's PARENT - a real SHA for the commit before the release,
+`v3.1.0^`, and it prints the tag's PARENT - a real SHA for the commit before the release,
 with no error to warn you.
 
 Use the full 40 characters, matching what Dependabot writes.

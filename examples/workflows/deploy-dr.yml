@@ -36,12 +36,12 @@ concurrency:
 
 jobs:
   lint-and-test:
-    uses: Apeify/ci/.github/workflows/lint-and-test.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/lint-and-test.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
     with:
       environment: dr
 
   minify:
-    uses: Apeify/ci/.github/workflows/minify.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+    uses: Apeify/ci/.github/workflows/minify.yml@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
     # If deploy.yml sets public-dir on ITS minify job, set the same value here.
     # The deploy refuses minified assets made from a different directory, and
     # this stub is the one nobody runs until the day it matters.
@@ -70,7 +70,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: Apeify/ci/actions/deploy@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
+      - uses: Apeify/ci/actions/deploy@fc438c1856e225848f8d5f0d75f01b7fb0c83e6b # v3.1.0
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
