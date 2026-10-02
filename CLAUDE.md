@@ -71,10 +71,11 @@ bash tests/run.sh                                   # behavior of the shell in t
 
 **The tests run the shipping code, not a copy of it.** They run the deploy action's scripts in
 [actions/deploy/scripts/](actions/deploy/scripts/) exactly as the action does, and
-[tests/lib/harness.sh](tests/lib/harness.sh) pulls a step's `run:` body out of `minify.yml`, whose
-shell cannot live in files. A transcription under `tests/` would keep passing while the action was
-broken. Two consequences worth knowing before editing either side: every deploy step longer than a
-line belongs in a script that takes every value from `env:` and contains no `${{ }}`
+[tests/lib/harness.sh](tests/lib/harness.sh) pulls a step's `run:` body out of a reusable workflow
+(`minify.yml`, `lint-and-test.yml`), whose shell cannot live in files. A transcription under
+`tests/` would keep passing while the action was broken. Two consequences worth knowing before
+editing either side: every deploy step longer than a line belongs in a script that takes every
+value from `env:` and contains no `${{ }}`
 ([tests/action-wiring.test.sh](tests/action-wiring.test.sh) enforces both), and a test named
 `REGRESSION` records a bug that actually shipped. They need only bash, awk and git; the
 JS-validity cases also use Node when it is installed and say so when it is not.
@@ -106,7 +107,7 @@ examples/         Copyable artifacts, laid out to mirror where each goes in a
                   YAML-parses this one.
 scripts/          Logic shared between CI and the VS Code tasks.
 tests/            Behavior tests. Run the deploy action's scripts, plus the shell
-                  extracted from minify.yml.
+                  extracted from the reusable workflows.
 .actionlint-version   Pinned version + checksums, read by CI and the dev container.
 ```
 

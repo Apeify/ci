@@ -2,10 +2,10 @@
 # Runs every *.test.sh in this directory.
 #
 # These tests run the deploy action's scripts (actions/deploy/scripts/) the way
-# the action does, and the shell extracted from minify.yml, so they test the
-# code that ships rather than a transcription of it. They need bash, awk and
-# git - nothing installed, no network - so a broken change is caught before any
-# download-dependent step starts.
+# the action does, and the shell extracted from the reusable workflows, so they
+# test the code that ships rather than a transcription of it. They need bash,
+# awk and git - nothing installed, no network - so a broken change is caught
+# before any download-dependent step starts.
 #
 # What they cannot do is test a deploy. There is no host here and no
 # credentials, so nothing below exercises rsync, ssh, or the server-side layout.

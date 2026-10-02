@@ -224,7 +224,9 @@ disagree, so what you see here is always what is in `examples/`.
 #
 # On the `lint-and-test` job:
 #
-#   php-version      PHP version used for lint and tests.
+#   php-version      PHP version used for lint and tests. Leave it unset if
+#                    the repo has a .php-version file, which is read instead;
+#                    setting both to different values fails the run.
 #   environment      Override which environment the deploy targets. Normally
 #                    derived from the branch; see deploy-dr.yml.
 #
@@ -683,7 +685,7 @@ input, ... is not defined in the referenced workflow".
 
 | Input | Default | Meaning |
 |---|---|---|
-| `php-version` | `8.3` | PHP version for lint and tests |
+| `php-version` | *(`.php-version`, else `8.3`)* | PHP version for lint and tests. Unset, the repo's `.php-version` file is used when present. Set to a value that disagrees with that file, the run fails |
 | `environment` | *(derived from the ref)* | Override which environment the deploy targets. Set it to reach a third target such as Disaster Recovery |
 
 **`minify.yml`** - on the `minify` job:

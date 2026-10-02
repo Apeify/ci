@@ -11,7 +11,7 @@
 #
 # The exception is the reusable workflows. A workflow's `run:` blocks cannot
 # live in files of their own - nothing from this repo is on disk when a
-# consumer's job runs one - so for minify.yml the harness pulls a step's block
+# consumer's job runs one - so for those the harness pulls a step's block
 # back out of the YAML and runs that.
 #
 # Extraction is done with awk rather than a YAML parser on purpose: these tests

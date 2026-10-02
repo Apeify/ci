@@ -11,6 +11,26 @@ Dependabot shows the matching section of this file in the pull request that bump
 read it there before merging. Pin by commit SHA as described in
 [README.md](README.md#versioning), and take the SHA with `git rev-list -n 1 <tag>`.
 
+## [3.1.0] - 2026-10-02
+
+Action is required only for a site that both sets the `php-version` input and has a
+`.php-version` file saying something different: its lint-and-test job now fails until the input is
+removed or the two match. Every other site needs nothing beyond moving the pin.
+
+### Changed
+
+- **`lint-and-test` reads the repo's `.php-version`.** The `php-version` input no longer defaults to
+  `8.3`. Left unset, setup-php reads `.php-version` when the repo has one, and `8.3` is used when
+  it does not. A site that already has a `.php-version` saying something other than `8.3` will now
+  lint and test against that version instead.
+- **A `php-version` input that disagrees with `.php-version` fails the run.** One of the two is
+  stale, and picking either silently would test against a PHP nobody chose. The comparison is
+  exact, so `8.4` against a file saying `8.4.1` is refused too: remove the input and let the file
+  decide.
+- **A `php-version` input with whitespace inside it is refused.** `8. 3` is more likely a mistyped
+  `8.13` than an `8.3`, so it fails rather than being repaired. Whitespace around the value is
+  still trimmed.
+
 ## [3.0.1] - 2026-10-02
 
 No action required. Apart from the one fix below, which no correctly configured site can notice, the
@@ -184,6 +204,7 @@ with "workflow was not found".
 First release: a reusable `deploy.yml` workflow (lint and test, then rsync over SSH to one or more
 web roots), the `promote.yml` publish button, and example stubs.
 
+[3.1.0]: https://github.com/Apeify/ci/releases/tag/v3.1.0
 [3.0.1]: https://github.com/Apeify/ci/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Apeify/ci/releases/tag/v3.0.0
 [2.1.0]: https://github.com/Apeify/ci/releases/tag/v2.1.0

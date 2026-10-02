@@ -77,7 +77,9 @@
 #
 # On the `lint-and-test` job:
 #
-#   php-version      PHP version used for lint and tests.
+#   php-version      PHP version used for lint and tests. Leave it unset if
+#                    the repo has a .php-version file, which is read instead;
+#                    setting both to different values fails the run.
 #   environment      Override which environment the deploy targets. Normally
 #                    derived from the branch; see deploy-dr.yml.
 #

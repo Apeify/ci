@@ -29,9 +29,12 @@ on:
   workflow_call:
     inputs:
       php-version:
-        description: PHP version used for the lint and test steps.
+        description: >-
+          PHP version used for the lint and test steps. Leave it unset to read
+          the repo's .php-version file, or 8.3 when there is none. Setting it
+          alongside a .php-version that says something different fails the run.
         type: string
-        default: '8.3'
+        default: ''
       environment:
         description: >-
           Override which environment the deploy targets. Normally derived from
@@ -55,6 +58,12 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # The PHP used when a repo neither passes php-version nor has a .php-version.
+  # Configuration rather than logic, so it lives here: bump the default here
+  # and nowhere in the steps below.
+  DEFAULT_PHP_VERSION: '8.3'
 
 jobs:
   lint-and-test:
@@ -103,10 +112,82 @@ jobs:
           echo "attestation=lint-and-test:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "Deploy environment resolved to '${resolved}'."
 
+      # Detected, like the test suite below: a repo with a .php-version has
+      # already said which PHP it runs, and setup-php reads that file itself
+      # whenever it is given no version. So when the file exists this passes
+      # nothing, and the file is parsed by one reader - setup-php's - not two
+      # that could disagree about what it says.
+      #
+      # The fallback (DEFAULT_PHP_VERSION, at the top of this file) cannot simply
+      # be left to setup-php. With neither an input nor a file it goes on to
+      # composer.json's platform setting and then to "latest", so an
+      # unconfigured repo would change PHP version the day a new one ships.
+      #
+      # Whitespace around the input is trimmed; whitespace inside it is refused
+      # rather than removed. "8. 3" is more likely a mistyped 8.13 than an 8.3,
+      # and guessing would test against a PHP nobody asked for.
+      #
+      # An input AND a file is two places for the truth. Agreeing is harmless;
+      # disagreeing means one of them is stale, and silently picking either
+      # would test against a PHP the maintainer did not expect. The comparison
+      # below only guards - it never chooses what gets installed - so where its
+      # reading of the file differs from setup-php's, the worst case is a loud
+      # failure, not the wrong PHP.
+      - name: Resolve PHP version
+        id: php
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.php-version }}
+        run: |
+          # Empty would hand setup-php nothing, which is the "latest" this step
+          # exists to prevent - so a lost env var fails here, not silently.
+          fallback="${DEFAULT_PHP_VERSION:?DEFAULT_PHP_VERSION is not set}"
+
+          # Trim leading, then trailing, whitespace - pure bash, no subshell.
+          # Not `read -r requested <<< ...`: that keeps only the first line, so
+          # "8.3\n8.4" would become 8.3 and slip past the check below.
+          requested="$REQUESTED"
+          requested="${requested#"${requested%%[![:space:]]*}"}"
+          requested="${requested%"${requested##*[![:space:]]}"}"
+          case "$requested" in
+            *[[:space:]]*)
+              echo "::error::php-version input '${requested}' contains whitespace."
+              echo "Pass a version such as 8.3 or 8.3.12, or omit the input."
+              exit 1 ;;
+          esac
+
+          if [ ! -f .php-version ]; then
+            version="${requested:-$fallback}"
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "No .php-version - using PHP ${version}."
+            exit 0
+          fi
+
+          # Close to setup-php's reading - the first line that is a full X.Y.Z,
+          # with an optional "php " prefix, else the whole file - but more
+          # forgiving of CRLF and stray whitespace. Where they differ, setup-php
+          # is the stricter one and fails on its own.
+          contents="$(tr -d '\r' < .php-version)"
+          from_file="$(printf '%s\n' "$contents" \
+            | sed -n -E '/^(php[[:space:]])?[0-9]+\.[0-9]+\.[0-9]+$/{s/^(php[[:space:]])?//p;q;}')"
+          if [ -z "$from_file" ]; then
+            from_file="$(printf '%s' "$contents" | tr -d '[:space:]')"
+          fi
+
+          if [ -n "$requested" ] && [ "$requested" != "$from_file" ]; then
+            echo "::error::php-version input '${requested}' disagrees with .php-version ('${from_file}')."
+            echo "Remove the php-version input to use the file, or make the two match."
+            exit 1
+          fi
+
+          echo "version=" >> "$GITHUB_OUTPUT"
+          echo "Using .php-version (${from_file})."
+
       - name: Set up PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
-          php-version: ${{ inputs.php-version }}
+          # Empty when .php-version exists, which makes setup-php read the file.
+          php-version: ${{ steps.php.outputs.version }}
 
       - name: Syntax check all PHP files
         shell: bash
