@@ -67,4 +67,4 @@ jobs:
     # `secrets: inherit` would add nothing it uses, and would hand every
     # repository and organization secret to shared code that has no use for
     # them.
-    uses: Apeify/ci/.github/workflows/promote.yml@ebf4376a2fcdb25c8cac266c03ee4d7b560942d0 # v3.0.0
+    uses: Apeify/ci/.github/workflows/promote.yml@c41a8a67b73f3e43747f51159b64e252ea90d819 # v3.0.1
