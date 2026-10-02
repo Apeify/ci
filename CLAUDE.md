@@ -57,10 +57,11 @@ Open in VS Code and choose **Reopen in Container** ([.devcontainer/](.devcontain
 installs `shellcheck`, Node, and the same pinned `actionlint` CI uses.
 
 Run the checks with **Ctrl+Shift+B** (Terminal -> Run Task -> **Validate all**), which chains the
-five check tasks defined in [.vscode/tasks.json](.vscode/tasks.json) (the sixth label there is
-`Validate all` itself):
+six check tasks defined in [.vscode/tasks.json](.vscode/tasks.json) (the seventh label there is
+`Validate all` itself), one per CI layer plus the action-metadata check:
 
 ```bash
+bash scripts/check-workflow-structure.sh            # YAML parses, action structure, run: blocks parse
 bash scripts/lint-workflows.sh                      # schema, expressions, embedded shell
 bash scripts/check-readme-examples.sh               # README blocks match examples/
 shellcheck -x --source-path=SCRIPTDIR <every *.sh>  # standalone scripts
@@ -68,14 +69,15 @@ bash scripts/check-action-metadata.sh               # no expressions in action m
 bash tests/run.sh                                   # behavior of the shell in the deploy action
 ```
 
-**The tests run the shipping code, not a copy of it.** [tests/lib/harness.sh](tests/lib/harness.sh)
-extracts a step's `run:` body - or one function - out of `actions/deploy/action.yml` (or
-`minify.yml`) and executes it, because a transcription under `tests/` would keep passing while the
-action was broken. Two consequences worth knowing before editing either side: the preflight and
-minified-assets steps are testable only because they take every value from `env:` and contain no
-`${{ }}` of their own, and a test named `REGRESSION` records a bug that actually shipped. They
-need only bash, awk and git; the JS-validity cases also use Node when it is installed and say so
-when it is not.
+**The tests run the shipping code, not a copy of it.** They run the deploy action's scripts in
+[actions/deploy/scripts/](actions/deploy/scripts/) exactly as the action does, and
+[tests/lib/harness.sh](tests/lib/harness.sh) pulls a step's `run:` body out of `minify.yml`, whose
+shell cannot live in files. A transcription under `tests/` would keep passing while the action was
+broken. Two consequences worth knowing before editing either side: every deploy step longer than a
+line belongs in a script that takes every value from `env:` and contains no `${{ }}`
+([tests/action-wiring.test.sh](tests/action-wiring.test.sh) enforces both), and a test named
+`REGRESSION` records a bug that actually shipped. They need only bash, awk and git; the
+JS-validity cases also use Node when it is installed and say so when it is not.
 
 **Local checks cannot test a deploy.** There is no host and no credentials here, so nothing
 exercises rsync, ssh, or the server-side layout. The real integration test is to point one
@@ -93,16 +95,18 @@ process in full.
   validate.yml       The ONLY workflow with triggers. Lints the others.
 actions/
   deploy/         Composite action. The rsync half, run inside the CONSUMER's job.
+    scripts/      Its shell, one file per step plus lib.sh. Run by action.yml.
 examples/         Copyable artifacts, laid out to mirror where each goes in a
                   consuming repo.
   workflows/      Belongs in the consumer's .github/workflows/. NOT in this repo's
                   .github/workflows - they carry real triggers and would run here.
   dependabot.yml  Belongs at the consumer's .github/dependabot.yml. Config, not a
                   workflow: actionlint rejects it, so lint-workflows.sh lints the
-                  workflows/ directory only and validate.yml's extractor
+                  workflows/ directory only and check-workflow-structure.sh
                   YAML-parses this one.
 scripts/          Logic shared between CI and the VS Code tasks.
-tests/            Behavior tests. Extract the shell from the deploy action and run it.
+tests/            Behavior tests. Run the deploy action's scripts, plus the shell
+                  extracted from minify.yml.
 .actionlint-version   Pinned version + checksums, read by CI and the dev container.
 ```
 
@@ -127,6 +131,12 @@ Two properties are load-bearing and easy to break by accident:
 - **A major release is not finished without a Migrating section in
   [CHANGELOG.md](CHANGELOG.md).** Add the release's entry in the same change that makes it major,
   not at tag time, so the note is reviewed with the code it describes.
+- **A deploy script documents itself in its header.** Anyone opening a file in
+  [actions/deploy/scripts/](actions/deploy/scripts/) should learn from its top comment what it
+  does and why, which step runs it, every input (name and description), its outputs, and when it
+  refuses - without opening `action.yml`. The step's comment in `action.yml` stays a one-line
+  summary plus anything about the YAML itself. The wiring test fails if a header's Inputs list
+  does not name exactly what its step passes.
 - **Never use an em dash (U+2014) or en dash (U+2013)** in code, comments, or documentation. Any
   time one is needed, a regular dash (-) will do.
 - **Use American spelling, never British.** `behavior` not `behaviour`, `normalize` not `normalise`,

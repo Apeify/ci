@@ -18,8 +18,23 @@ description: >-
 # works identically whoever owns the repo.
 #
 # The cost is that actionlint does not understand composite actions - it parses
-# this file as a workflow and reports nonsense - so the schema and shell checks
-# it would provide come from tests/ and validate.yml's extractor instead.
+# this file as a workflow and reports nonsense - so the schema checks it would
+# provide come from layer 1 (scripts/check-workflow-structure.sh) and the
+# metadata check instead.
+#
+# WHY THE SHELL LIVES IN scripts/
+#
+# Every step longer than a line runs a file from scripts/, found through
+# $GITHUB_ACTION_PATH, which always points at the copy of this action the
+# caller pinned - so the scripts are pinned exactly as this file is. Inline,
+# the same shell had no shellcheck at all (actionlint never sees it), helpers
+# had to be copied into every step that used them, and tests had to cut the
+# shell back out of this YAML with awk. As files they are shellchecked like
+# every other script, share lib.sh, and are run by tests/ as they ship.
+# tests/action-wiring.test.sh checks the two halves still point at each other.
+#
+# Each script is run as `bash <file>`, never as an executable: the executable
+# bit does not survive every checkout, and `bash` behaves the same everywhere.
 #
 # See lint-and-test.yml for why the OTHER half is deliberately still a workflow.
 
@@ -244,115 +259,41 @@ outputs:
 runs:
   using: composite
   steps:
-    # The lint job cannot be skipped, but it CAN be misconfigured - a stub that
-    # passes a literal here rather than the job output would defeat the point.
-    # Cheap to check, and it fails before the SSH key is ever written.
+    # Each step's script explains what it does and why, and lists what it reads
+    # and writes - open the file on its `run:` line. Comments here cover only
+    # what belongs to the YAML: when a step runs, and where its values come
+    # from.
+    #
+    # Values reach the scripts through `env:`, never by interpolating `${{ }}`
+    # into shell. A branch name or variable value is attacker-influencable in
+    # principle, and interpolation would splice it into the source of a shell
+    # running in the job that holds the deploy key - `$(...)` inside it would
+    # execute. tests/action-wiring.test.sh refuses an expression in a script or
+    # on a `run:` line.
+    #
+    # Refuses unless `attestation` came from this run's lint-and-test job.
     - name: Require the lint and test job
       shell: bash
       env:
         ATTESTATION: ${{ inputs.attestation }}
-      run: |
-        # An EXACT match against the value lint-and-test.yml emits, not a
-        # prefix. `lint-and-test:*` accepted the literal string
-        # `lint-and-test:skip`, which is precisely the hand-written value this
-        # is supposed to reject. GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are
-        # identical in the caller's job, so the expected value is computable
-        # here.
-        #
-        # Be clear about what this does and does not prove. It shows that some
-        # job in THIS run emitted the string; it cannot show that this job
-        # declared `needs: lint-and-test`. The real guarantee is structural and
-        # lives elsewhere: a job calling a reusable workflow cannot also declare
-        # `steps:`, so the two halves cannot share a runner. This check only
-        # raises forging it from typing a constant to adding a job that
-        # reproduces the run id.
-        expected="lint-and-test:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-        if [ "$ATTESTATION" != "$expected" ]; then
-          echo "::error::attestation input did not come from this run's lint-and-test job."
-          echo "Pass 'needs.lint-and-test.outputs.attestation' rather than a literal."
-          echo "That job runs in a separate VM, which is what keeps third-party test code off"
-          echo "the runner holding the deploy key."
-          exit 1
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/require-attestation.sh"
 
-    # Parse the handoff from the minify workflow before anything else
-    # happens, so a stub that never passed it fails in the first seconds with
-    # a sentence naming the fix. Only the SHAPE is checked here; whether the
-    # artifact matches this checkout is "Apply minified assets" below.
-    #
-    # The download directory is cleared here too, so a leftover from an
-    # earlier step in the caller's job cannot pass for the artifact.
+    # Checks the shape of `minified-assets` and picks the artifact to download.
     - name: Check the minified-assets handoff
       id: assets-handoff
       shell: bash
       env:
         MINIFIED_ASSETS: ${{ inputs.minified-assets }}
         DOWNLOAD_DIR: ${{ runner.temp }}/apeify-ci-minified-assets
-      run: |
-        rm -rf "$DOWNLOAD_DIR"
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-handoff.sh"
 
-        if [ "$MINIFIED_ASSETS" = "none" ]; then
-          echo "artifact-id=" >> "$GITHUB_OUTPUT"
-          echo "The minify job found no CSS or JS to minify."
-          exit 0
-        fi
-
-        if [ -z "$MINIFIED_ASSETS" ]; then
-          echo "::error::The 'minified-assets' input is empty."
-          echo "Add a minify job calling Apeify/ci's minify.yml, and pass"
-          echo "'needs.minify.outputs.minified-assets'. See the README's Minification section."
-          exit 1
-        fi
-
-        if ! [[ "$MINIFIED_ASSETS" =~ ^[0-9]+:[0-9a-f]{64}$ ]]; then
-          echo "::error::The 'minified-assets' input is not a value the minify workflow produces."
-          echo "Pass 'needs.minify.outputs.minified-assets' unchanged, not a literal."
-          exit 1
-        fi
-
-        echo "artifact-id=${MINIFIED_ASSETS%%:*}" >> "$GITHUB_OUTPUT"
-
-    # NO CHECKOUT HERE. The caller does it, and this step only checks the
-    # result.
-    #
-    # As a reusable workflow this ran in its own job and had to check out for
-    # itself. As an action it runs in the CALLER's job, where a checkout has
-    # already happened - and `actions/checkout` defaults to `clean: true`, which
-    # is `git clean -ffdx`. Doing it again would silently delete anything the
-    # caller built between their checkout and this step: compiled assets, a
-    # `composer install --no-dev` tree, a generated config. An action that
-    # destroys its caller's workspace is a bad neighbor, so this asks for what
-    # it needs instead of taking it.
-    #
-    # Full history is a real requirement, not a preference: the mtime restore
-    # dates every file from its last commit, and a shallow clone silently dates
-    # only what it has. Checked explicitly so a missing `fetch-depth: 0` fails
-    # here with a sentence naming the fix, rather than as a deploy that
-    # re-transfers the whole tree every run for reasons nobody can see.
+    # Requires the caller's checkout, with full history. This action never
+    # checks out for itself; the script says why.
     - name: Check the workspace
       shell: bash
-      run: |
-        if [ ! -d .git ]; then
-          echo "::error::No checkout found. Add actions/checkout before this action:"
-          echo ""
-          echo "    - uses: actions/checkout@<sha>"
-          echo "      with:"
-          echo "        fetch-depth: 0"
-          exit 1
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-workspace.sh"
 
-        if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-          echo "::error::The checkout is shallow. Add 'fetch-depth: 0' to actions/checkout."
-          echo "The mtime restore dates each file from its last commit, which needs full history."
-          exit 1
-        fi
-
-    # Fail with an explicit list of what is missing rather than with whatever
-    # error an empty value happens to produce three steps later. Misconfigured
-    # secrets are the single most common failure when wiring up a new repo,
-    # and the natural failure modes are actively misleading: an empty SSH key
-    # looks like a key-format problem, and an empty web root is far worse than
-    # that - see the validation of WEB_ROOT_DIRS below.
+    # Validates every value the deploy depends on before anything transfers.
     - name: Preflight - check configuration
       id: preflight
       shell: bash
@@ -368,692 +309,32 @@ runs:
         APP_DIR: ${{ inputs.app-dir }}
         APP_REMOTE_DIR: ${{ inputs.app-remote-dir }}
         DEPLOY_APP_DIR: ${{ inputs.deploy-app-dir }}
-      run: |
-        # Every path-ish value in this workflow goes through one set of rules,
-        # deliberately: they are all interpolated into rsync destinations that
-        # run with --delete, and they all fail the same catastrophic way. An
-        # empty, absolute, or dot-only value silently retargets the deploy at
-        # DEPLOY_BASE_DIR itself, which then prunes everything in the account
-        # that is not in the source tree.
-        #
-        # Sharing one check is what stops the four call sites from drifting
-        # apart as they are edited.
-        #
-        # ONE normalizer, used by every comparison below. Collapses repeated
-        # slashes, removes './' segments wherever they appear - leading,
-        # interior or trailing - and strips trailing slashes, so 'site.com',
-        # './site.com', './/site.com/', '././site.com', 'site.com/.' and
-        # 'site.com/./' all compare equal.
-        #
-        # The comparisons are string prefix tests, so a value that reaches
-        # them in an unexpected spelling defeats them SILENTLY. This has now
-        # been the same bug twice, which is why the normalizer is deliberately
-        # aggressive rather than minimal:
-        #
-        #   'app-remote-dir: ./site.com/app' - only the two repository-side
-        #   values were normalized, and only one leading './'.
-        #
-        #   'WEB_ROOT_DIRS: site.com/.' with 'app-remote-dir: site.com/app' -
-        #   every value was normalized, but a trailing '/.' survived it, so
-        #   the nesting test built the pattern 'site.com/./*' and never
-        #   matched 'site.com/app'.
-        #
-        # Both placed the entire private tree inside a served web root while
-        # every check reported success. Any new spelling that survives this
-        # function is the same bug again: normalize, then compare.
-        #
-        # (norm_path itself is defined below, after these captures.)
+      run: bash "$GITHUB_ACTION_PATH/scripts/preflight.sh"
 
-        # Facts this action publishes as outputs, captured before any guard can
-        # exit. The commit is read here rather than inside the production branch
-        # below because every environment wants to know what it deployed, and a
-        # consumer correlating a deploy against monitoring should not have to
-        # care which environment it was.
-        deployed_sha=$(git rev-parse HEAD)
-        # One `date` call for both representations. Reading the epoch again
-        # later made started-at and started-epoch different instants, so
-        # duration-seconds did not match the interval between the two
-        # timestamps it is documented as measuring - on a production deploy the
-        # gap included the whole origin fetch.
-        started_epoch=$(date -u +%s)
-        started_at=$(date -u -d "@${started_epoch}" +%Y-%m-%dT%H:%M:%SZ)
-
-        norm_path() {
-          printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
-        }
-
-        check_relative_dir() {
-          label="$1"
-          value="$2"
-
-          if [ -z "$value" ]; then
-            echo "::error::${label} must not be empty."
-            return 1
-          fi
-
-          case "$value" in
-            /*)   echo "::error::${label} '${value}' must be relative to its parent, not an absolute path."; return 1 ;;
-            *..*) echo "::error::${label} '${value}' must not contain '..'."; return 1 ;;
-            # A double quote or backslash would break the web-roots JSON output,
-            # which is built by hand and states these cannot occur. That claim
-            # was false until this line existed: 'my"site.com' produced
-            # ["my"site.com"], which a consumer's fromJSON() rejects AFTER both
-            # rsyncs have already written and deleted. A backslash is worse -
-            # ["a\b"] parses as a different name, so a matrix silently targets
-            # the wrong root. Neither belongs in a web root name anyway.
-            *\"*) echo "::error::${label} '${value}' must not contain a double quote."; return 1 ;;
-            *"\\"*) echo "::error::${label} '${value}' must not contain a backslash."; return 1 ;;
-          esac
-
-          # Normalize, then re-test what is left. Trailing slashes are
-          # harmless to rsync but produce '//' in the destination, which reads
-          # like a bug in the log; leading './' segments hide the dot-only
-          # case below.
-          trimmed=$(norm_path "$value")
-
-          # A value made only of dots and slashes - '.', './', './/' - passes
-          # every check above and then resolves to the PARENT directory. For a
-          # web root that is DEPLOY_BASE_DIR, and --delete against it empties
-          # the account. Same catastrophe as an empty value, different route.
-          if [ -z "$trimmed" ] || [ -z "$(printf '%s' "$trimmed" | tr -d './')" ]; then
-            echo "::error::${label} '${value}' resolves to its parent directory, which would delete everything in it."
-            return 1
-          fi
-
-          return 0
-        }
-
-        # The `environment` input could otherwise be used to send any ref's
-        # content to production, walking straight past the promote gate: the
-        # whole point of `main` having no push trigger is that production only
-        # ever receives what promote.yml fast-forwarded there.
-        #
-        # So the invariant is enforced here rather than assumed. `production`
-        # is not an arbitrary name to hardcode - the default mapping above
-        # already treats it specially - and this simply keeps that mapping
-        # true when the input is used.
-        #
-        # Other environments are NOT covered, because this workflow cannot
-        # know which of them are production-like. A DR target should carry the
-        # branch half of this rule, expressed as an `if:` on the calling job -
-        # see examples/workflows/deploy-dr.yml. Only the branch half:
-        # `if:` cannot inspect git history, so the staging-containment check
-        # below has no equivalent out there.
-        # Compared case-INSENSITIVELY. `environment: Production` names the same
-        # GitHub environment as `production`, so a case-sensitive test would
-        # let one spelling walk straight past this refusal.
-        if [ "$(printf '%s' "$RESOLVED_ENVIRONMENT" | tr '[:upper:]' '[:lower:]')" = "production" ]; then
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "::error::Refusing to deploy to production from '${GITHUB_REF}'."
-            echo "Production only ever receives what promote.yml fast-forwarded onto main."
-            echo "Publish with the 'Publish to production' button instead of deploying this ref directly."
-            exit 1
-          fi
-
-          # Being ON main is not enough, and this is the gap that matters.
-          #
-          # The deploy stub carries workflow_dispatch - it must, because
-          # promote.yml reaches this workflow by dispatching it - so anyone
-          # with write access can run the deploy directly against `main` from
-          # the Actions tab. That path skips promote.yml entirely, including
-          # its check that main holds nothing staging has not seen. Omitting
-          # `main` from the stub's push trigger stops accidental deploys; it
-          # does not stop this one.
-          #
-          # So the invariant is enforced here rather than assumed: the commit
-          # this run is deploying must already be contained in staging. After
-          # a normal publish it is the tip of both; if staging has moved on
-          # since, the deployed commit is merely behind it, which is still
-          # contained and still fine. Only a commit pushed straight to main
-          # fails this.
-          # FAILS CLOSED, deliberately. An earlier version ended this fetch
-          # with `>/dev/null 2>&1 || true` and downgraded a missing
-          # origin/staging to a warning, so a transient network failure
-          # skipped the check entirely - on the one configuration it exists to
-          # refuse - while the discarded stderr made the log blame a missing
-          # branch. A guard that opts out when it cannot run is not a guard.
-          if ! git fetch --prune --no-tags origin \
-               +refs/heads/main:refs/remotes/origin/main \
-               +refs/heads/staging:refs/remotes/origin/staging; then
-            echo "::error::Could not fetch origin to check this commit against staging - refusing to deploy production."
-            echo "This check is the only thing between a commit pushed straight to main and the live site, so a fetch failure is fatal rather than skippable."
-            exit 1
-          fi
-
-          if ! git rev-parse --verify -q refs/remotes/origin/staging >/dev/null; then
-            echo "::error::origin/staging does not exist - refusing to deploy production."
-            echo "This pipeline's model is that production only serves what staging has already served, so there is nothing to verify against."
-            exit 1
-          fi
-
-          # Compare the COMMIT BEING DEPLOYED, not origin/main.
-          #
-          # The workspace is checked out at github.sha, frozen when this run
-          # was created; origin/main is whatever the branch points at right
-          # now. Those diverge whenever a run sits queued - more likely since
-          # cancel-in-progress became false - or if main moves after dispatch.
-          # It is the WORKSPACE that gets rsynced, so validating origin/main
-          # would approve a commit this run is not deploying.
-          deploying="$deployed_sha"
-
-          if ! git merge-base --is-ancestor "$deploying" origin/staging; then
-            echo "::error::The commit being deployed is not contained in staging - refusing to deploy production."
-            echo "Deploying ${deploying}. These commits are in it but were never on staging:"
-            git log --oneline origin/staging..HEAD
-            echo ""
-            echo "Get them onto staging first, then publish with the 'Publish to production' button."
-            exit 1
-          fi
-        fi
-
-        # Checked FIRST, and separately, because an empty value here does not
-        # merely misconfigure the deploy - it silently disables both production
-        # refusals above. `required: true` on an action input is advisory: the
-        # runner does not enforce it, so a stub that omits or misspells
-        # `environment:` reaches this point with an empty string, fails the
-        # `= "production"` test, and deploys any ref to whatever environment the
-        # caller's job entered. Refuse rather than default: guessing 'staging'
-        # here would deploy staging's tree using production's credentials
-        # whenever the caller's environment block said production.
-        env_trimmed=$(printf '%s' "$RESOLVED_ENVIRONMENT" | tr -d '[:space:]')
-        if [ -z "$env_trimmed" ]; then
-          echo "::error::The 'environment' input is empty."
-          echo "Pass 'needs.lint-and-test.outputs.environment', the same value the job's own environment: block uses."
-          echo "Without it the production refusals below cannot run, so this is fatal rather than defaulted."
-          exit 1
-        fi
-
-        # Exactly 'true' or 'false', refused otherwise, because the step gate
-        # and this shell compare it DIFFERENTLY. GitHub's `==` on strings is
-        # case-insensitive, POSIX `[ = ]` is not - so 'True' made every reader
-        # here say false while `if: inputs.deploy-app-dir == 'true'` on the app
-        # sync said true. That combination skipped reject_repo_root,
-        # check_relative_dir, the app-inside-public checks and the
-        # app-inside-web-root loop, and then rsynced the private tree anyway:
-        # 'True' plus 'app-remote-dir: site.com/app' published the whole app
-        # tree over HTTP, and plus '../shared' ran --delete outside the account
-        # home.
-        #
-        # Normalizing the case here would fix the disagreement too, but
-        # refusing is better: it leaves exactly one spelling for each value, so
-        # a future reader cannot reintroduce the split by comparing the raw
-        # string somewhere new.
-        case "$DEPLOY_APP_DIR" in
-          true|false) ;;
-          *)
-            echo "::error::deploy-app-dir must be exactly 'true' or 'false' (got '${DEPLOY_APP_DIR}')."
-            echo "It is a string, and it is compared case-sensitively here but case-INSENSITIVELY by the"
-            echo "step condition that runs the app sync, so any other spelling makes the two disagree."
-            exit 1 ;;
-        esac
-
-        missing=""
-        for name in DEPLOY_SSH_KEY DEPLOY_HOST DEPLOY_USER DEPLOY_BASE_DIR; do
-          [ -z "${!name}" ] && missing="${missing} ${name} (secret)"
-        done
-        [ -z "$WEB_ROOT_DIRS" ] && missing="${missing} WEB_ROOT_DIRS (variable)"
-
-        # SITE_URL is deliberately NOT in the list above. An unset value costs
-        # a clickable link on the GitHub deployment and nothing else - the
-        # deploy itself is unaffected. Failing a production deploy over a
-        # cosmetic UI detail would be the wrong trade, so this warns instead.
-        if [ -z "${SITE_URL}" ]; then
-          echo "::warning::SITE_URL is not set for this environment. The deploy will work; GitHub just will not show a link to the site."
-        fi
-
-        if [ -n "$missing" ]; then
-          echo "::error::Missing configuration for the '${RESOLVED_ENVIRONMENT}' environment:${missing}"
-          echo "Set these under Settings -> Environments in THIS repository."
-          echo "See https://github.com/Apeify/ci#configuration"
-          exit 1
-        fi
-
-        # DEPLOY_BASE_DIR is interpolated straight into an rsync destination
-        # that runs with --delete, so a malformed value is not a typo, it is
-        # data loss. It must be absolute, must not contain '..', and must not
-        # be the filesystem root. A trailing slash IS accepted - norm_path
-        # strips it below, and rejecting it would break every environment
-        # whose secret was pasted as '/home/username/'.
-        case "$DEPLOY_BASE_DIR" in
-          /*) ;;
-          *) echo "::error::DEPLOY_BASE_DIR must be an absolute path (got '${DEPLOY_BASE_DIR}')."; exit 1 ;;
-        esac
-
-        # Held to the same '..' rule as every relative path, rather than being
-        # the one path in the workflow exempt from it. '/home/u/..' makes each
-        # web root a sibling of the account home and scopes --delete there.
-        case "$DEPLOY_BASE_DIR" in
-          *..*) echo "::error::DEPLOY_BASE_DIR must not contain '..' (got '${DEPLOY_BASE_DIR}')."; exit 1 ;;
-        esac
-
-        # The filesystem root would make every web root a top-level directory
-        # and scope --delete to '/'. norm_path reduces '/', '//' and '/.' all
-        # to the empty string, so this one test covers every spelling of it.
-        if [ -z "$(norm_path "$DEPLOY_BASE_DIR")" ]; then
-          echo "::error::DEPLOY_BASE_DIR must not be the filesystem root."
-          exit 1
-        fi
-
-        # Validate every web root BEFORE anything is transferred.
-        #
-        # This is the most dangerous value in the whole workflow. The rsync
-        # destination is "<base>/<root>/", so an empty entry collapses it to
-        # "<base>//" - the account home itself - and --delete would then prune
-        # everything there that is not in public/. That is the web roots, app/,
-        # and any state kept alongside them.
-        #
-        # Blank lines are SKIPPED, not rejected. A value entered through the
-        # GitHub UI routinely ends with a newline, so a trailing empty entry is
-        # normal input rather than a mistake and failing on it would be
-        # useless. What is refused is a variable with no usable entry at all
-        # (the count check below) and any entry that resolves to its parent
-        # (check_relative_dir). The `continue` is therefore load-bearing, not
-        # tidiness - and the copy of it in the rsync step is the one that
-        # actually stands between a stray newline and the account home.
-        count=0
-        web_roots=()
-        while IFS= read -r raw; do
-          dir=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          # LOAD-BEARING, and not for the reason the rsync step's copy is.
-          # check_relative_dir below rejects an empty value, so without this
-          # the trailing newline described above would fail the preflight
-          # outright rather than being skipped. See the rsync step for the
-          # other half.
-          [ -z "$dir" ] && continue
-          check_relative_dir "WEB_ROOT_DIRS entry" "$dir" || exit 1
-          norm=$(norm_path "$dir")
-          web_roots+=( "$norm" )
-          count=$((count + 1))
-          echo "  web root: ${norm}"
-        done <<< "$WEB_ROOT_DIRS"
-
-        if [ "$count" -eq 0 ]; then
-          echo "::error::WEB_ROOT_DIRS contained no usable entries."
-          exit 1
-        fi
-
-        # Web roots must be SIBLINGS, never nested in one another. Each is
-        # rsynced with --delete, so two overlapping trees would each remove
-        # what the other just wrote and the winner would depend on ordering -
-        # a deploy that "works" or not depending on the order of lines in a
-        # variable is the worst kind of intermittent.
-        i=0
-        while [ "$i" -lt "${#web_roots[@]}" ]; do
-          j=$((i + 1))
-          while [ "$j" -lt "${#web_roots[@]}" ]; do
-            a="${web_roots[$i]}"
-            b="${web_roots[$j]}"
-
-            if [ "$a" = "$b" ]; then
-              echo "::error::WEB_ROOT_DIRS lists '${a}' twice."
-              exit 1
-            fi
-            case "$b" in "$a"/*)
-              echo "::error::web root '${b}' is inside web root '${a}'. Web roots must be siblings under DEPLOY_BASE_DIR."
-              exit 1 ;;
-            esac
-            case "$a" in "$b"/*)
-              echo "::error::web root '${a}' is inside web root '${b}'. Web roots must be siblings under DEPLOY_BASE_DIR."
-              exit 1 ;;
-            esac
-
-            j=$((j + 1))
-          done
-          i=$((i + 1))
-        done
-
-        echo "${count} web root(s) validated."
-
-        # The repository root is NOT supported as a web root, and the generic
-        # dots-only rejection below would explain that badly - its message is
-        # about destinations collapsing onto DEPLOY_BASE_DIR, which is not the
-        # problem here. Catch it first and say something useful.
-        #
-        # Syncing the repository root to a web root publishes .git (full
-        # history, and any secret ever committed and later removed), .github,
-        # tests, and dependency manifests. It also cannot coexist with a
-        # private app directory, because that directory would sit INSIDE the
-        # published tree. Both are structural, so this is a hard no rather
-        # than a warning.
-        # A function rather than a loop over both inputs, because app-dir must
-        # be checked only where it is actually used. An earlier version looped
-        # over both here, ABOVE the deploy-app-dir gate, so a site with no
-        # private tree at all could still be failed over the value of an input
-        # its own configuration had switched off - 'deploy-app-dir: false'
-        # with 'app-dir: .' meaning "there isn't one" was rejected with advice
-        # to run `git mv` into a directory it does not have.
-        reject_repo_root() {
-          label="$1"
-          value="$2"
-          [ -n "$value" ] || return 0
-          [ -z "$(norm_path "$value" | tr -d './')" ] || return 0
-          echo "::error::${label} cannot be the repository root."
-          echo "Move the files you want deployed into a subdirectory and point ${label} at it:"
-          echo ""
-          echo "    mkdir public"
-          echo "    git mv <your site files> public/"
-          echo ""
-          echo "Then set '${label}: public' (or omit it - 'public' is the default)."
-          return 1
-        }
-
-        reject_repo_root "public-dir" "$PUBLIC_DIR" || exit 1
-        check_relative_dir "public-dir" "$PUBLIC_DIR" || exit 1
-
-        # Report the NORMALIZED values, matching what the rsync steps actually
-        # use. Echoing the raw input would print "app//" for a value with a
-        # trailing slash and quietly disagree with the destination below it.
-        echo "public dir:     $(norm_path "$PUBLIC_DIR")/  (repo)"
-
-        # The app directory is optional. When deploy-app-dir is false the site has
-        # no private tree at all, so none of the app-* inputs are validated or
-        # used - see the input's description for why this is a typed boolean
-        # rather than an empty app-dir.
-        #
-        # app-remote-dir defaults to app-dir so the out-of-box behavior is
-        # "the server name matches the repo name"; an input cannot default to
-        # another input, so the fallback is applied here.
-        if [ "$DEPLOY_APP_DIR" = "true" ]; then
-          reject_repo_root "app-dir" "$APP_DIR" || exit 1
-          check_relative_dir "app-dir" "$APP_DIR" || exit 1
-
-          # The app directory must sit outside the public directory IN THE
-          # REPOSITORY, not merely beside it on the server.
-          #
-          # The server-side comparison below cannot see this. With
-          # app-dir=public/app and public-dir=public, every server-side check
-          # passes - <BASE>/app really is beside <BASE>/site.com - while the
-          # public sync copies public/'s CONTENTS into each web root, app/
-          # included. The entire private tree ends up served over HTTP, and
-          # excluding dotfiles would not help, because it is the source and
-          # config that are exposed.
-          public_repo=$(norm_path "$PUBLIC_DIR")
-          app_repo=$(norm_path "$APP_DIR")
-
-          if [ "$app_repo" = "$public_repo" ]; then
-            echo "::error::app-dir and public-dir are the same directory ('${app_repo}')."
-            echo "The private tree would be published over HTTP."
-            exit 1
-          fi
-          case "$app_repo" in "$public_repo"/*)
-            echo "::error::app-dir '${app_repo}' is INSIDE public-dir '${public_repo}'."
-            echo "Everything under public-dir is copied into the web roots, so the private tree would be served over HTTP."
-            exit 1 ;;
-          esac
-          case "$public_repo" in "$app_repo"/*)
-            echo "::error::public-dir '${public_repo}' is INSIDE app-dir '${app_repo}'."
-            echo "The app sync would then carry the public tree as well, and the two rsyncs would overlap."
-            exit 1 ;;
-          esac
-
-          app_remote="${APP_REMOTE_DIR:-$APP_DIR}"
-          check_relative_dir "app-remote-dir" "$app_remote" || exit 1
-          app_norm=$(norm_path "$app_remote")
-
-          # The entire design rests on the app directory sitting BESIDE the
-          # web roots, never within one. Nothing above enforces that:
-          # app-remote-dir may legally contain slashes, so 'site.com/app'
-          # passes every other check and then places the whole application
-          # source inside a web root, served over HTTP.
-          #
-          # Note that excluding dotfiles would not save you here - if the app
-          # tree lands in a web root, its source, config and any server-side
-          # credentials are already public. The layout is the control.
-          for wr in "${web_roots[@]}"; do
-            if [ "$app_norm" = "$wr" ]; then
-              echo "::error::app-remote-dir '${app_norm}' is the same directory as web root '${wr}'."
-              echo "The two rsyncs both run with --delete, so they would erase each other."
-              exit 1
-            fi
-            case "$app_norm" in "$wr"/*)
-              echo "::error::app-remote-dir '${app_norm}' is INSIDE web root '${wr}'."
-              echo "That publishes your application source over HTTP. It must sit beside the web roots, not within one."
-              exit 1 ;;
-            esac
-            case "$wr" in "$app_norm"/*)
-              echo "::error::web root '${wr}' is INSIDE app-remote-dir '${app_norm}'."
-              echo "The two rsyncs both run with --delete, so they would erase each other. They must be siblings."
-              exit 1 ;;
-            esac
-          done
-
-          echo "app dir:        $(norm_path "$APP_DIR")/  (repo)  ->  ${app_norm}/  (server)"
-        else
-          echo "app dir:        none (deploy-app-dir is false)"
-        fi
-
-        # ------------------------------------------------------------ outputs
-        #
-        # Facts, never interpretations. `paths-deleted: 412` is something a
-        # consumer can write a policy against; a `risky: true` computed here
-        # would bake one site's policy into shared code.
-        #
-        # NOTHING DERIVED FROM A SECRET GOES IN HERE. base-dir, host and user
-        # are secrets, so the rsync destination, the account path and any
-        # summary built from them stay in the log where masking applies. What
-        # ships is names and counts.
-        #
-        # Web roots are emitted as JSON so a caller can fromJSON() them straight
-        # into a matrix. Building it by hand rather than with jq: the runner has
-        # jq, but a self-contained loop is one less thing to depend on, and the
-        # values are already validated to contain no quotes or backslashes.
-        roots_json="["
-        sep=""
-        for wr in "${web_roots[@]}"; do
-          roots_json="${roots_json}${sep}\"${wr}\""
-          sep=","
-        done
-        roots_json="${roots_json}]"
-
-        {
-          echo "deployed-sha=${deployed_sha}"
-          echo "started-at=${started_at}"
-          echo "started-epoch=${started_epoch}"
-          echo "web-roots=${roots_json}"
-          echo "web-root-count=${#web_roots[@]}"
-          echo "app-remote-dir=${app_norm:-}"
-          # The effective value, not the raw input. F1 above already limits it
-          # to two spellings, so this is belt and braces - but an output that
-          # passes its input through is one validation change away from
-          # publishing something a consumer's `== 'false'` will never match.
-          if [ "$DEPLOY_APP_DIR" = "true" ]; then
-            echo "app-deployed=true"
-          else
-            echo "app-deployed=false"
-          fi
-        } >> "$GITHUB_OUTPUT"
-
-    # Values reach the shell through `env:`, never by interpolating
-    # `${{ ... }}` into the script body. A branch name or variable value is
-    # attacker-influencable in principle, and interpolation splices it into
-    # the source of a shell running in the job that holds the deploy key -
-    # `$(...)` inside it would execute. That is why BRANCH and SITE_URL are
-    # env vars here rather than inline expressions; they were the last two
-    # steps in this file that had not been converted.
-    #
-    # The two `${{ job.* }}` expressions further down are the deliberate
-    # exception. Those come from GitHub itself, describing the workflow file
-    # that is running - there is no input, ref or variable anyone can steer
-    # into them - and there is no `env:`-shaped way to get at them that is any
-    # safer. The rule is about untrusted values, not about the syntax.
+    # Logs what is being deployed, and which version of this action is doing it.
     - name: Show deploy target
       shell: bash
       env:
         RESOLVED_ENVIRONMENT: ${{ inputs.environment }}
         BRANCH: ${{ github.ref_name }}
         SITE_URL: ${{ inputs.site-url }}
-      run: |
-        echo "Branch:       ${BRANCH}"
-        echo "Environment:  ${RESOLVED_ENVIRONMENT}"
-        echo "Site URL:     ${SITE_URL}"
-        # Which version of this action ran, straight from GitHub rather than a
-        # hand-maintained version string.
-        #
-        # Read it for what it is: action_ref is the LITERAL ref written in the
-        # caller's `uses:`. Pinned by SHA it is the SHA and answers the question
-        # exactly; tracking a branch it says "main", which identifies the branch
-        # and not the commit. The reusable-workflow form of this logged
-        # job.workflow_sha, which was always a commit - that resolution is not
-        # available to an action, and it is one more reason to pin by SHA.
-        echo "Pipeline:     ${{ github.action_repository }}"
-        echo "Pipeline ref: ${{ github.action_ref }}"
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/show-target.sh"
 
-    # A fresh checkout stamps every file with a brand-new mtime, which makes
-    # rsync's size+mtime quick check treat the whole tree as changed on every
-    # deploy: every file is re-sent and lands on the server with a new mtime.
-    # Restoring each file's mtime to its last-commit date fixes both halves:
-    # unchanged files are skipped, and any <lastmod> derived from filemtime()
-    # reflects when a page actually changed rather than the latest deploy.
-    #
-    # Hand-rolled rather than the git-restore-mtime package: that tool shells
-    # out to the deprecated `git whatchanged` plumbing, which newer git
-    # versions refuse to run without --i-still-use-this - it fails with zero
-    # output and no error, silently restoring nothing.
-    #
-    # ONE history walk, not one `git log` per tracked file. The saving is
-    # process count, and it scales on file count rather than on file count
-    # times a history lookup.
-    #
-    # --diff-merges=first-parent is LOAD-BEARING, not a tuning flag. Without
-    # it, `git log --name-only` prints no filenames at all for a merge commit
-    # (git will not pick a parent to diff against), so a file whose current
-    # content came from a merge is mishandled in one of two ways:
-    #   * a file created while resolving the merge is MISSED entirely - it
-    #     keeps its checkout mtime and re-syncs on every deploy;
-    #   * a file whose conflict was resolved silently inherits the OLDER
-    #     parent's timestamp - it still gets a value, so a "missed files"
-    #     counter reports zero and the error stays invisible.
-    # Verified against a fixture containing both cases: with this flag every
-    # tracked file gets a timestamp, and a conflict resolution gets the
-    # merge's own date rather than an older parent's.
-    #
-    # It does NOT reproduce `git log -1 -- <file>` exactly, and an earlier
-    # version of this comment wrongly claimed it did. `git log -- <path>`
-    # applies history simplification and reports the side-branch commit,
-    # while --diff-merges=first-parent attributes it to the merge. The two
-    # disagree for a file changed only on a side branch - see the trade-off
-    # below, which is the same fact stated correctly.
-    #
-    # The flag's one trade-off: a file changed only on a side branch is dated
-    # to when it LANDED on the mainline rather than when it was authored. Both
-    # readings of "last modified" are defensible, and at day granularity it is
-    # almost always the same date.
-    #
-    # Three details that matter if you copy this:
-    #   * The `[ -e ]` guard is required, not defensive. The walk emits
-    #     historical paths that no longer exist, and `touch` CREATES a missing
-    #     file - without the guard the tree fills with empty files at deleted
-    #     paths and rsync ships them.
-    #   * core.quotePath=false stops git escaping non-ASCII paths, which would
-    #     otherwise be touched under their quoted names and silently missed.
-    #   * Do NOT make awk emit NUL-delimited output. mawk truncates a printf
-    #     format string at an embedded \0, so `printf "%s\0%s\0"` silently
-    #     produces nothing usable and the step restores ZERO mtimes while
-    #     exiting 0. gawk handles it, so this passes on a dev box and fails on
-    #     the runner: Ubuntu's /usr/bin/awk is mawk. Records are
-    #     newline-delimited instead, and read in pairs.
-    #
-    # Batching the touches by timestamp was tried and abandoned: bash cannot
-    # hold NUL bytes in a variable, so grouping paths in a shell array
-    # concatenates them. Correctness beats the couple of seconds.
+    # Dates every file from its last commit, so rsync sends only what changed.
     - name: Restore file mtimes from git history
       shell: bash
-      run: |
-        marker=$(printf '\001')
-        touched=0
+      run: bash "$GITHUB_ACTION_PATH/scripts/restore-mtimes.sh"
 
-        # Two lines per record: timestamp, then path.
-        git -c core.quotePath=false log --diff-merges=first-parent \
-            --format="${marker}%ct" --name-only \
-        | awk -v M="$marker" '
-            substr($0, 1, 1) == M {
-              t = substr($0, 2)
-              if (t ~ /^[0-9]+$/) { ts = t; next }
-            }
-            $0 == ""    { next }
-            !seen[$0]++ { print ts; print $0 }
-          ' > /tmp/mtimes.txt
-
-        : > /tmp/walked.txt
-        while IFS= read -r ts && IFS= read -r path; do
-          case "$ts" in
-            ''|*[!0-9]*)
-              echo "::error::mtime restore desynchronized at '${ts}' - does a tracked path contain a newline?"
-              exit 1
-              ;;
-          esac
-          if [ -e "$path" ]; then
-            touch -d "@$ts" -- "$path"
-            printf '%s\n' "$path" >> /tmp/walked.txt
-            touched=$((touched + 1))
-          fi
-        done < /tmp/mtimes.txt
-
-        # Belt and braces: REPAIR anything the walk did not attribute at all,
-        # instead of only warning about it. In the normal case this loop spawns
-        # zero git processes, so it costs nothing.
-        #
-        # Note precisely what it does and does not cover. `comm -23` finds
-        # files the walk MISSED; it cannot find files the walk MIS-DATED,
-        # because those already have a timestamp. So a file dated to a merge
-        # rather than to its side-branch commit is not repaired here, and the
-        # counters will report it as successfully walked. That is the accepted
-        # trade-off described above, not a gap this loop closes.
-        LC_ALL=C sort -u /tmp/walked.txt > /tmp/walked.sorted
-        repaired=0
-        while IFS= read -r f; do
-          ts=$(git log -1 --format=%ct -- "$f")
-          if [ -n "$ts" ]; then
-            touch -d "@$ts" -- "$f"
-            repaired=$((repaired + 1))
-          else
-            echo "::warning::no commit timestamp for '$f' - it will re-sync every deploy."
-          fi
-        done < <(comm -23 <(git -c core.quotePath=false ls-files | LC_ALL=C sort) /tmp/walked.sorted)
-
-        tracked=$(git ls-files | wc -l)
-        echo "restored mtimes on $tracked tracked files: $touched from the history walk, $repaired via per-file fallback"
-
-    # Bring in the CSS and JS that the minify workflow produced.
+    # Fetches the minify workflow's artifact by the ID the handoff check
+    # extracted - never by name: any job in the run can upload an artifact,
+    # but only the minify job can set its own outputs. Skipped when there is
+    # nothing to minify.
     #
-    # NO THIRD-PARTY CODE RUNS IN THIS JOB TO DO IT. Minifying used to happen
-    # here, with esbuild ordered before the SSH key was written, and that
-    # ordering protected nothing: the runner holds every secret this job was
-    # given in memory from the first step, and any step can `sudo` to read it.
-    # See the header of .github/workflows/minify.yml for the rest.
-    # The only code here this repo did not write is GitHub's own artifact
-    # client, pinned by SHA - the same trust already extended to
-    # actions/checkout.
-    #
-    # The artifact is untrusted input, and is checked as such before a single
-    # byte of it reaches the tree that gets rsynced:
-    #
-    #   - It is fetched by the ID the minify job published, never by name.
-    #     Any job in the run can upload an artifact; only that job can set its
-    #     own outputs.
-    #   - Its file list must EQUAL what this checkout's own discovery finds.
-    #     An extra file is refused, not ignored - that is the one thing that
-    #     stops a compromised minifier planting a .php file in a web root. A
-    #     missing file is refused too, since it would ship unminified.
-    #   - Every entry must be a regular file. A symlink could point anywhere on
-    #     this runner, ~/.ssh included, and the copy would follow it.
-    #   - The digest covers each file's SOURCE hash as well as its minified
-    #     hash, recomputed here from this checkout. A minified file is accepted
-    #     only as the replacement for the exact source it was made from - which
-    #     also catches a minify job `public-dir` that names a different
-    #     directory from this action's.
-    #   - The JS-validity and collapsed-file checks run again here, on what was
-    #     received, rather than trusting the other job's report of them.
-    #
-    # Assets the caller built in THIS job, after checkout and before this
-    # action, are not covered: the minify job never saw them, so they show up
-    # as missing from the artifact and the deploy is refused. That is loud on
-    # purpose - shipping them unminified, or minifying them here, would each
-    # quietly undo something.
-    #
-    # Written into the workspace in place of the source - the repo keeps the
-    # readable source; nothing is committed back. The copies get a fresh mtime,
-    # exactly as the in-place minify did, so they re-sync each deploy.
+    # GitHub's own artifact client, pinned by SHA, is the only code in this job
+    # this repo did not write - the same trust already extended to
+    # actions/checkout. Everything it downloads is checked by the next step.
     - name: Download minified assets
       if: steps.assets-handoff.outputs.artifact-id != ''
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1061,129 +342,18 @@ runs:
         artifact-ids: ${{ steps.assets-handoff.outputs.artifact-id }}
         path: ${{ runner.temp }}/apeify-ci-minified-assets
 
-    # Every value comes from env: and the step contains no expressions, so
-    # tests/minified-assets.test.sh drives it as written. The record format
-    # must match the minify job's byte for byte; that test runs both and is
-    # what notices if they drift.
+    # Checks the artifact against this checkout, file for file, then writes the
+    # minified copies over the source.
     - name: Apply minified assets
       shell: bash
       env:
         MINIFIED_ASSETS: ${{ inputs.minified-assets }}
         PUBLIC_DIR: ${{ inputs.public-dir }}
         DOWNLOAD_DIR: ${{ runner.temp }}/apeify-ci-minified-assets
-      run: |
-        expected=()
-        if [ -d "$PUBLIC_DIR/assets" ]; then
-          mapfile -d '' -t expected < <(
-            cd "$PUBLIC_DIR" &&
-              find assets -type f \( -name '*.css' -o -name '*.js' \) -print0 | LC_ALL=C sort -z
-          )
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/apply-minified-assets.sh"
 
-        if [ "$MINIFIED_ASSETS" = "none" ]; then
-          if [ ${#expected[@]} -ne 0 ]; then
-            echo "::error::The minify job minified nothing, but ${PUBLIC_DIR}/assets here holds ${#expected[@]} CSS/JS file(s):"
-            printf '  %s\n' "${expected[@]}"
-            echo "Either the minify job's public-dir names a different directory from this action's,"
-            echo "or those files were created in this job after checkout. Refusing to ship them unminified."
-            exit 1
-          fi
-          echo "No CSS or JS to apply."
-          exit 0
-        fi
-
-        if [ ${#expected[@]} -eq 0 ]; then
-          echo "::error::The minify job minified CSS/JS, but ${PUBLIC_DIR}/assets here holds none."
-          echo "The minify job's public-dir must name the same directory as this action's."
-          exit 1
-        fi
-
-        if [ ! -d "$DOWNLOAD_DIR" ] || [ -L "$DOWNLOAD_DIR" ]; then
-          echo "::error::The minified-assets artifact was not downloaded to ${DOWNLOAD_DIR}."
-          exit 1
-        fi
-
-        # Everything that is not a directory must be a regular file...
-        entries=()
-        mapfile -d '' -t entries < <(
-          cd "$DOWNLOAD_DIR" && find . -mindepth 1 ! -type d -print0 | LC_ALL=C sort -z
-        )
-        bad=0
-        for entry in "${entries[@]}"; do
-          if [ -L "${DOWNLOAD_DIR}/${entry}" ] || [ ! -f "${DOWNLOAD_DIR}/${entry}" ]; then
-            echo "::error::Artifact entry '${entry#./}' is not a regular file."
-            bad=1
-          fi
-        done
-        [ "$bad" -eq 0 ] || exit 1
-
-        # ...and the set of them must equal what discovery found here.
-        received=()
-        for entry in "${entries[@]}"; do
-          received+=("${entry#./}")
-        done
-        if [ "$(printf '%s\0' "${received[@]}" | LC_ALL=C sort -z | sha256sum)" != \
-             "$(printf '%s\0' "${expected[@]}" | sha256sum)" ]; then
-          echo "::error::The minified-assets artifact does not hold exactly the CSS/JS this checkout has."
-          echo "Expected (from ${PUBLIC_DIR}/assets here):"
-          printf '  %s\n' "${expected[@]}"
-          echo "Received:"
-          printf '  %s\n' "${received[@]}"
-          echo "Refusing to deploy. An extra file is never copied into the tree."
-          exit 1
-        fi
-
-        records=$(mktemp)
-        for rel in "${expected[@]}"; do
-          src_hash=$(sha256sum < "${PUBLIC_DIR}/${rel}" | cut -d' ' -f1)
-          min_hash=$(sha256sum < "${DOWNLOAD_DIR}/${rel}" | cut -d' ' -f1)
-          printf '%s\0%s\0%s\0' "$rel" "$src_hash" "$min_hash" >> "$records"
-        done
-        digest=$(sha256sum < "$records" | cut -d' ' -f1)
-        rm -f "$records"
-
-        if [ "$digest" != "${MINIFIED_ASSETS#*:}" ]; then
-          echo "::error::The minified assets do not match the digest the minify job published."
-          echo "Either the artifact changed after it was produced, or a file here differs from the"
-          echo "source that job minified. Refusing to deploy."
-          exit 1
-        fi
-
-        # Every GitHub-hosted runner has Node. Checked once, so a self-hosted
-        # runner without it is told so, rather than told every script it
-        # ships is invalid JavaScript.
-        if ! command -v node >/dev/null 2>&1; then
-          echo "::error::node is not installed on this runner; it is needed to check the minified JavaScript."
-          exit 1
-        fi
-
-        # Checked IN PLACE, after the copy, not in the download directory:
-        # `node --check` decides between ES module and CommonJS from the
-        # nearest package.json, so the same file can pass in the repo and fail
-        # in a temp directory, or the reverse. A refusal here fails the action
-        # before any sync step, so the copies already made never ship.
-        for rel in "${expected[@]}"; do
-          f="${PUBLIC_DIR}/${rel}"
-          before=$(wc -c < "$f")
-          cp -- "${DOWNLOAD_DIR}/${rel}" "$f"
-          after=$(wc -c < "$f")
-
-          case "$rel" in
-            *.js)
-              if ! node --check "$f"; then
-                echo "::error::$f: the minified file is not valid JavaScript - refusing to deploy."
-                exit 1
-              fi ;;
-          esac
-
-          if [ "$before" -gt 0 ] && [ "$after" -eq 0 ]; then
-            echo "::error::$f collapsed from $before bytes to nothing - refusing to deploy."
-            exit 1
-          fi
-
-          echo "$f: ${before} -> ${after} bytes"
-        done
-
+    # Writes the deploy key and the host's known_hosts entry. The last step
+    # deletes the key again, even after a failure.
     - name: Configure SSH
       id: ssh
       shell: bash
@@ -1192,52 +362,10 @@ runs:
         SSH_HOST: ${{ inputs.host }}
         SSH_PORT: ${{ inputs.port }}
         HOST_KEY: ${{ inputs.host-key }}
-      run: |
-        mkdir -p ~/.ssh
-        # Write via printf (not echo/interpolation) so the multi-line PEM key
-        # is preserved exactly and ends with a single trailing newline.
-        printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
-        chmod 600 ~/.ssh/deploy_key
+      run: bash "$GITHUB_ACTION_PATH/scripts/configure-ssh.sh"
 
-        # Fail early with a clear message if the key is not a valid private
-        # key. The usual cause is a PuTTY .ppk pasted straight into the secret.
-        if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
-          echo "::error::DEPLOY_SSH_KEY is not a valid unencrypted OpenSSH private key. Check the secret's format."
-          exit 1
-        fi
-
-        if [ -n "$HOST_KEY" ]; then
-          # Pinned host key: we know what we expect to be talking to.
-          printf '%s\n' "$HOST_KEY" >> ~/.ssh/known_hosts
-          echo "Using pinned DEPLOY_HOST_KEY."
-          echo "host-key-pinned=true" >> "$GITHUB_OUTPUT"
-        else
-          # Trust on first use. This accepts whatever the server presents, on
-          # every run, so it cannot detect a substituted host. Set
-          # DEPLOY_HOST_KEY to close that gap.
-          #
-          # No -H. Hashing hides which hosts a known_hosts file refers to,
-          # which is worth something on a shared machine and nothing on a
-          # runner that discards the file minutes later - while costing the
-          # ability to read the entry when a host-key failure needs debugging.
-          # The docs tell consumers not to hash a pinned value; hashing here
-          # would contradict that for no gain.
-          echo "::warning::DEPLOY_HOST_KEY is not set - falling back to ssh-keyscan (trust on first use)."
-          ssh-keyscan -p "${SSH_PORT:-22}" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          echo "host-key-pinned=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    # Nothing is deployed until the expected layout is actually present.
-    #
-    # This is not merely about a half-built repo. `rsync --delete` with a
-    # MISSING source fails safely, but with an EMPTY public/ it SUCCEEDS and
-    # empties the live web root. Requiring the directory to be NON-EMPTY is
-    # what stops that.
-    #
-    # An earlier version of this comment said the gate was on
-    # public/index.php. It is not, and should not be: that would tie the check
-    # to one framework's front-controller name, when the condition that
-    # actually matters is simply "is there anything to deploy".
+    # Refuses a missing or empty public directory: rsync --delete from an empty
+    # one would empty every web root. Both syncs run only when this passes.
     - name: Check target layout is present
       id: layout
       shell: bash
@@ -1245,39 +373,9 @@ runs:
         PUBLIC_DIR: ${{ inputs.public-dir }}
         APP_DIR: ${{ inputs.app-dir }}
         DEPLOY_APP_DIR: ${{ inputs.deploy-app-dir }}
-      run: |
-        # The EMPTY case is the one that matters. rsync --delete with a
-        # MISSING source fails safely, but with an empty source directory it
-        # SUCCEEDS and empties the live web root. So check for content, not
-        # just existence.
-        #
-        # Checks the directory is non-empty rather than looking for a specific
-        # front controller: which file that is depends on the framework, and
-        # this workflow should not need to know.
-        if [ ! -d "$PUBLIC_DIR" ] || [ -z "$(ls -A "$PUBLIC_DIR" 2>/dev/null)" ]; then
-          echo "::error::${PUBLIC_DIR}/ is missing or empty - refusing to deploy."
-          exit 1
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-layout.sh"
 
-        # Only required when the site actually has a private tree. A missing
-        # app directory is a hard error rather than a silent skip: if it were
-        # a skip, a typo in app-dir would deploy the public tree while its
-        # backing code silently went stale.
-        if [ "$DEPLOY_APP_DIR" = "true" ] && [ ! -d "$APP_DIR" ]; then
-          echo "::error::${APP_DIR}/ is missing - refusing to deploy."
-          echo "If this site has no private directory, pass 'deploy-app-dir: false' instead."
-          exit 1
-        fi
-
-        echo "ready=true" >> "$GITHUB_OUTPUT"
-        echo "Target layout present - deploying."
-
-    # --itemize-changes logs one line per file rsync touches (and why), and
-    # --stats summarizes the bytes moved - together they show in the deploy log
-    # that the mtime restoration above kept the sync incremental.
-    #
-    # Every web root gets the identical tree. They are not ranked: the app
-    # tells them apart at runtime by HTTP_HOST, not by which copy it loaded.
+    # rsyncs public-dir's contents into every web root, with --delete.
     - name: Rsync public/ contents into each web root
       id: public-sync
       if: steps.layout.outputs.ready == 'true'
@@ -1290,155 +388,10 @@ runs:
         WEB_ROOT_DIRS: ${{ inputs.web-root-dirs }}
         PUBLIC_DIR: ${{ inputs.public-dir }}
         EXCLUDES: ${{ inputs.public-excludes }}
-      run: |
-        # Two categories of exclude, deliberately separate.
-        #
-        # These are the NEVER-SHIP ones, and the caller cannot remove them.
-        # .git in a web root exposes the full history - including any secret
-        # ever committed and later deleted - and is actively scanned for.
-        # .github exposes the pipeline. Neither has any business on a web
-        # server, so neither depends on the caller getting public-excludes
-        # right. It costs nothing when public-dir is a subdirectory, because
-        # there is no .git inside it to match.
-        #
-        # rsync patterns without a leading slash match a basename at ANY
-        # depth, so these also catch a nested .git from a submodule or a
-        # vendored checkout.
-        exclude_args=( "--exclude=.git" "--exclude=.github" )
+      run: bash "$GITHUB_ACTION_PATH/scripts/sync-public.sh"
 
-        # And these are the CONVENTIONAL ones the caller may override.
-        #
-        # Every list this workflow accepts is newline-separated, including the
-        # exclude inputs. Splitting on newlines rather than whitespace means a
-        # pattern containing a space still works, and it keeps one parsing
-        # idiom across WEB_ROOT_DIRS and both exclude lists.
-        while IFS= read -r pattern; do
-          pattern=$(printf '%s' "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          [ -z "$pattern" ] && continue
-          exclude_args+=( "--exclude=${pattern}" )
-        done <<< "$EXCLUDES"
-
-        # Print what actually applies. Supplying public-excludes REPLACES the
-        # default list rather than extending it, and without this line that
-        # substitution stays invisible until something you assumed was
-        # excluded turns up on the server.
-        echo "excludes in effect:"
-        printf '  %s\n' "${exclude_args[@]#--exclude=}"
-
-        # Same normalizer the preflight validated these values with. Steps are
-        # separate shells, so it is defined again rather than shared.
-        norm_path() {
-          printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
-        }
-
-        # (The transfer-stats helper above is unrelated to the paths below.)
-
-        # Building the destination from the SAME spelling the preflight
-        # checked matters beyond cosmetics: "/home/u//site.com//" in a log
-        # looks like a bug and invites someone to "fix" it, and a path shown
-        # here that differs from the one the nesting checks approved is
-        # exactly how a reader talks themselves out of trusting either.
-        # Transfer facts for this action's outputs. Defined in both rsync steps
-        # because Actions steps are separate shells, the same reason norm_path
-        # is.
-        #
-        # Parsed from the transfer rather than guessed. `*deleting` lines are
-        # the only version-independent record of what --delete actually removed:
-        # rsync's own "Number of deleted files" stat did not exist before 3.1.
-        # Both figures SUM across the log, because the public step runs rsync
-        # once per web root and reading a single block would report the last
-        # root only.
-        sync_log=$(mktemp)
-
-        emit_transfer_stats() {
-          log="$1"
-          transferred=$(awk -F': *' '/^Number of regular files transferred:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
-          bytes=$(awk -F': *' '/^Total transferred file size:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
-          # `|| true` because grep exits 1 when it matches nothing, which is
-          # the ordinary no-deletions case. It still prints 0, so no default is
-          # needed after it.
-          deleted=$(grep -c '^\*deleting' "$log" || true)
-
-          {
-            echo "files-transferred=${transferred}"
-            echo "bytes-transferred=${bytes}"
-            echo "paths-deleted=${deleted}"
-            if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
-              echo "changed=true"
-            else
-              echo "changed=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
-
-          echo "transferred ${transferred} file(s), ${bytes} byte(s); removed ${deleted} path(s)"
-        }
-
-        base=$(norm_path "$BASE_DIR")
-        src=$(norm_path "$PUBLIC_DIR")
-
-        while IFS= read -r raw; do
-          dir=$(norm_path "$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")
-
-          # LOAD-BEARING. Do not delete this as redundant with the preflight.
-          #
-          # A trailing newline in the WEB_ROOT_DIRS variable is ordinary input
-          # and yields an empty entry on EVERY run. Without this line the
-          # destination below collapses to "<base>//" - the account home - and
-          # --delete prunes every web root, app/, and anything else kept there.
-          #
-          # The preflight has an identical-looking line, and it is load-bearing
-          # too - for a different reason. There it guards check_relative_dir,
-          # which REJECTS an empty value, so deleting it turns that ordinary
-          # trailing newline into a hard preflight failure on every deploy in
-          # every consuming repo. Neither copy is redundant with the other:
-          # remove the preflight's and no deploy runs at all, remove this one
-          # and a deploy runs against the account home.
-          [ -z "$dir" ] && continue
-
-          # Belt and braces, matching check_relative_dir's dot-only rejection
-          # rather than only its empty one: '.', './', './/' normalize to a
-          # non-empty '.', which resolves to the PARENT of the destination -
-          # the same catastrophe by a different route. The preflight already
-          # refuses these, so reaching here means something upstream broke.
-          if [ -z "$(printf '%s' "$dir" | tr -d './')" ]; then
-            echo "::error::web root '${raw}' resolves to its parent directory - refusing to rsync into ${base}/ itself."
-            exit 1
-          fi
-
-          echo "::group::rsync ${src}/ -> ${dir}"
-          # tee, not a redirect: the transfer stays visible in the log AND
-          # becomes countable. Under `pipefail` an rsync failure still fails the
-          # step, which a command substitution would have swallowed.
-          rsync -az --delete --itemize-changes --stats \
-            "${exclude_args[@]}" \
-            -e "ssh -i ~/.ssh/deploy_key -p ${SSH_PORT:-22}" \
-            "${src}/" \
-            "${SSH_USER}@${SSH_HOST}:${base}/${dir}/" 2>&1 | tee -a "$sync_log"
-          echo "::endgroup::"
-        done <<< "$WEB_ROOT_DIRS"
-
-        emit_transfer_stats "$sync_log"
-
-    # DANGER: the destination MUST be <BASE_DIR>/<name>/ with a NON-EMPTY
-    # <name>. If <name> were ever empty the destination would collapse to
-    # <BASE_DIR>/, and --delete would prune everything beside it - starting
-    # with every live web root.
-    #
-    # Note this guard MOVED rather than disappeared, and the history matters.
-    # This step used to pass `app` with no trailing slash, transferring the
-    # directory itself into BASE_DIR. That made targeting BASE_DIR
-    # structurally impossible, but it also meant the server-side name was
-    # forced to equal the repository's directory name. Supporting a different
-    # name on the server requires naming the destination explicitly, which
-    # trades the structural guarantee for a validated one.
-    #
-    # The validation is not optional bookkeeping: app-remote-dir goes through
-    # the same check_relative_dir() as every web root, which rejects empty,
-    # absolute, '..' and dot-only values. Do not interpolate an unvalidated
-    # value into this destination, and do not remove that preflight check.
-    #
-    # Synced once, regardless of how many web roots there are. See the header:
-    # every root shares this one directory.
+    # rsyncs app-dir beside the web roots, with --delete. Skipped for a site
+    # with no private directory.
     - name: Rsync app directory above the web roots
       id: app-sync
       # `== 'true'`, NOT a bare truthiness test. Composite action inputs are
@@ -1461,107 +414,9 @@ runs:
         APP_DIR: ${{ inputs.app-dir }}
         APP_REMOTE_DIR: ${{ inputs.app-remote-dir }}
         EXCLUDES: ${{ inputs.app-excludes }}
-      run: |
-        # Never-ship, same as the public sync and for the same reason: there is
-        # no deploy target on which a .git or .github directory belongs. In the
-        # public sync the argument is disclosure, since .git in a web root is
-        # actively scanned for. Here it is simpler than that - a repository's
-        # history is not part of the application, and syncing it would also
-        # re-transfer constantly churning git objects on every deploy.
-        #
-        # Only reachable at all when a submodule or vendored checkout sits
-        # under app-dir, since .git normally lives at the repository root. It
-        # costs nothing in the common case, exactly as in the public sync.
-        exclude_args=( "--exclude=.git" "--exclude=.github" )
+      run: bash "$GITHUB_ACTION_PATH/scripts/sync-app.sh"
 
-        while IFS= read -r pattern; do
-          pattern=$(printf '%s' "$pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          [ -z "$pattern" ] && continue
-          exclude_args+=( "--exclude=${pattern}" )
-        done <<< "$EXCLUDES"
-
-        # Same reasoning as the public step: show what is actually applied.
-        echo "excludes in effect:"
-        printf '  %s\n' "${exclude_args[@]#--exclude=}"
-
-        # Same normalizer the preflight validated these values with. Steps are
-        # separate shells, so it is defined again rather than shared.
-        norm_path() {
-          printf '%s' "$1" | sed -e 's|//*|/|g' -e ':a' -e 's|^\./||' -e 's|/\./|/|' -e 's|/\.$||' -e 'ta' -e 's|/*$||'
-        }
-
-        # Transfer facts for this action's outputs. Defined in both rsync steps
-        # because Actions steps are separate shells, the same reason norm_path
-        # is.
-        #
-        # Parsed from the transfer rather than guessed. `*deleting` lines are
-        # the only version-independent record of what --delete actually removed:
-        # rsync's own "Number of deleted files" stat did not exist before 3.1.
-        # Both figures SUM across the log, because the public step runs rsync
-        # once per web root and reading a single block would report the last
-        # root only.
-        sync_log=$(mktemp)
-
-        emit_transfer_stats() {
-          log="$1"
-          transferred=$(awk -F': *' '/^Number of regular files transferred:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
-          bytes=$(awk -F': *' '/^Total transferred file size:/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$log")
-          # `|| true` because grep exits 1 when it matches nothing, which is
-          # the ordinary no-deletions case. It still prints 0, so no default is
-          # needed after it.
-          deleted=$(grep -c '^\*deleting' "$log" || true)
-
-          {
-            echo "files-transferred=${transferred}"
-            echo "bytes-transferred=${bytes}"
-            echo "paths-deleted=${deleted}"
-            if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
-              echo "changed=true"
-            else
-              echo "changed=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
-
-          echo "transferred ${transferred} file(s), ${bytes} byte(s); removed ${deleted} path(s)"
-        }
-
-        base=$(norm_path "$BASE_DIR")
-        src=$(norm_path "$APP_DIR")
-
-        # Same fallback the preflight validated: the server name defaults to
-        # the repository name.
-        remote=$(norm_path "${APP_REMOTE_DIR:-$APP_DIR}")
-
-        # Belt and braces, and deliberately the SAME test check_relative_dir
-        # applies rather than a narrower one. An earlier version tested only
-        # for empty, but norm_path returns a non-empty '.' for '.', './' and
-        # './.', and that resolves to the PARENT of the destination - the
-        # account home - exactly as an empty value would. A backstop narrower
-        # than the hazard it names is not a backstop. The preflight refuses
-        # both already, so reaching here means something upstream broke, and
-        # the cost of being wrong is the whole account.
-        if [ -z "$remote" ] || [ -z "$(printf '%s' "$remote" | tr -d './')" ]; then
-          echo "::error::app remote directory resolved to '${remote}' - refusing to rsync into ${base}/ itself."
-          exit 1
-        fi
-
-        echo "rsync ${src}/ -> ${remote}/"
-        rsync -az --delete --itemize-changes --stats \
-          "${exclude_args[@]}" \
-          -e "ssh -i ~/.ssh/deploy_key -p ${SSH_PORT:-22}" \
-          "${src}/" \
-          "${SSH_USER}@${SSH_HOST}:${base}/${remote}/" 2>&1 | tee -a "$sync_log"
-
-        emit_transfer_stats "$sync_log"
-
-    # Aggregates the two syncs into one set of figures. Separate from them
-    # because the app step carries an `if:` and is skipped for a site with no
-    # private tree - a skipped step's outputs are empty strings, so every read
-    # below defaults, and the totals stay correct rather than becoming blank.
-    #
-    # Runs on the success path only. If any step above failed this never
-    # executes and every output is unset, which is the documented behavior of
-    # action outputs and the reason diagnosis belongs in the log, not here.
+    # Totals the two syncs into the action's outputs.
     - name: Summarize the deploy
       id: summary
       shell: bash
@@ -1574,28 +429,7 @@ runs:
         APP_DELETED: ${{ steps.app-sync.outputs.paths-deleted }}
         STARTED_EPOCH: ${{ steps.preflight.outputs.started-epoch }}
         PIPELINE_REF: ${{ github.action_ref }}
-      run: |
-        transferred=$(( ${PUBLIC_TRANSFERRED:-0} + ${APP_TRANSFERRED:-0} ))
-        bytes=$(( ${PUBLIC_BYTES:-0} + ${APP_BYTES:-0} ))
-        deleted=$(( ${PUBLIC_DELETED:-0} + ${APP_DELETED:-0} ))
-
-        finished_epoch=$(date -u +%s)
-
-        {
-          echo "files-transferred=${transferred}"
-          echo "bytes-transferred=${bytes}"
-          echo "paths-deleted=${deleted}"
-          echo "finished-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "duration-seconds=$(( finished_epoch - ${STARTED_EPOCH:-finished_epoch} ))"
-          echo "pipeline-ref=${PIPELINE_REF}"
-          if [ "$transferred" -gt 0 ] || [ "$deleted" -gt 0 ]; then
-            echo "changed=true"
-          else
-            echo "changed=false"
-          fi
-        } >> "$GITHUB_OUTPUT"
-
-        echo "deploy summary: ${transferred} file(s) transferred, ${deleted} deleted, ${bytes} byte(s)"
+      run: bash "$GITHUB_ACTION_PATH/scripts/summarize.sh"
 
     - name: Clean up SSH key
       shell: bash

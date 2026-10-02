@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for the three path helpers defined in the deploy action's preflight.
+# Unit tests for the three path helpers in actions/deploy/scripts/lib.sh.
 #
 # These are the highest-value tests in the repo. Every path in the workflow is
 # interpolated into an rsync destination that runs with --delete, the layout
@@ -10,24 +10,14 @@
 # shellcheck source=lib/harness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
 
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
-
-extract_run_step "$DEPLOY_ACTION" "Preflight - check configuration" > "${WORK}/preflight.sh"
-require_shell "${WORK}/preflight.sh" "norm_path()"
-
-for fn in norm_path check_relative_dir reject_repo_root; do
-  extract_function "${WORK}/preflight.sh" "$fn" >> "${WORK}/fns.sh"
-done
-require_shell "${WORK}/fns.sh" "reject_repo_root()"
-# shellcheck source=/dev/null
-source "${WORK}/fns.sh"
+# shellcheck source=../actions/deploy/scripts/lib.sh
+source "${DEPLOY_SCRIPTS}/lib.sh"
 
 # On `set -e`, and why these functions are called directly.
 #
-# harness.sh runs under `set -uo pipefail` - no `-e` - while GitHub runs the real
-# step as `bash --noprofile --norc -eo pipefail`. That difference looks like it
-# should matter and does not, because of HOW the workflow calls these functions.
+# harness.sh runs under `set -uo pipefail` - no `-e` - while the scripts that call
+# these functions run under `set -eo pipefail`. That difference looks like it
+# should matter and does not, because of HOW the scripts call these functions.
 # Every call site is of the form:
 #
 #   check_relative_dir "public-dir" "$PUBLIC_DIR" || exit 1
@@ -114,25 +104,6 @@ done
 assert_exit 0 "reject_repo_root ignores empty" reject_repo_root public-dir ""
 for good in public app public/ ./public site.com/app app/.; do
   assert_exit 0 "reject_repo_root allows '${good}'" reject_repo_root public-dir "$good"
-done
-
-describe "the three norm_path definitions must not drift apart"
-# norm_path is defined once in the preflight and once in each of the two rsync
-# steps, because Actions steps are separate shells. Only the preflight copy is
-# extracted above, so a change made to one and not the others would leave the
-# rsync steps building destinations from a spelling the preflight never
-# approved - and every assertion in this file would still pass. This is not
-# hypothetical: the fix that taught norm_path to collapse '/.' had to edit all
-# three.
-mapfile -t bodies < <(awk '
-  /norm_path\(\) \{/ { inblock = 1; body = ""; next }
-  inblock && /^ *\}/  { print body; inblock = 0; next }
-  inblock             { line = $0; sub(/^[ \t]+/, "", line); body = body line }
-' "$DEPLOY_ACTION")
-
-assert_exit 0 "norm_path is defined in more than one place" test "${#bodies[@]}" -ge 2
-for body in "${bodies[@]}"; do
-  assert_eq "${bodies[0]}" "$body" "every norm_path definition is byte-identical"
 done
 
 finish

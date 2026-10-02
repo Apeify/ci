@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for the minification handoff: the minify job in minify.yml, and
-# the two deploy-action steps that receive what it produced.
+# the two deploy-action scripts that receive what it produced.
 #
 # The two halves live in different files and agree on a record format only by
 # convention, so the central test here runs BOTH, as written, and feeds one's
@@ -33,13 +33,9 @@ PUBLISH="${WORK}/publish.sh"
 extract_run_step "$MINIFY_WORKFLOW" "Publish the handoff" > "$PUBLISH"
 require_shell "$PUBLISH" "minified-assets="
 
-HANDOFF="${WORK}/handoff.sh"
-extract_run_step "$DEPLOY_ACTION" "Check the minified-assets handoff" > "$HANDOFF"
-require_shell "$HANDOFF" "artifact-id="
+HANDOFF="${DEPLOY_SCRIPTS}/check-handoff.sh"
 
-APPLY="${WORK}/apply.sh"
-extract_run_step "$DEPLOY_ACTION" "Apply minified assets" > "$APPLY"
-require_shell "$APPLY" "DOWNLOAD_DIR"
+APPLY="${DEPLOY_SCRIPTS}/apply-minified-assets.sh"
 
 # ------------------------------------------------------------ stand-ins
 
@@ -136,7 +132,7 @@ run_apply() {
   (cd "$ws" && env -i PATH="${BIN}:${PATH}" HOME="$HOME" \
     PUBLIC_DIR=public \
     DOWNLOAD_DIR="${WORK}/dl" \
-    "$@" "${GH_BASH[@]}" "$APPLY")
+    "$@" bash "$APPLY")
 }
 
 # A fresh pair of checkouts, the minify job run in one, and its staging
@@ -222,7 +218,7 @@ assert_refused "no usable artifact id" "an upload with no id is refused" \
 run_handoff() {
   : > "${WORK}/handoff_output"
   env -i PATH="$PATH" GITHUB_OUTPUT="${WORK}/handoff_output" \
-    DOWNLOAD_DIR="${WORK}/dl" "$@" "${GH_BASH[@]}" "$HANDOFF"
+    DOWNLOAD_DIR="${WORK}/dl" "$@" bash "$HANDOFF"
 }
 handoff_id() { sed -n 's/^artifact-id=//p' "${WORK}/handoff_output"; }
 
@@ -296,7 +292,7 @@ if [ -p "${WORK}/dl/assets/site.css" ]; then
   # about the guard firing BEFORE anything reads the file. Under `timeout` so
   # that, with the guard broken, the suite fails instead of hanging forever.
   assert_refused "is not a regular file" "a named pipe where an asset should be" \
-    timeout 30 bash -c "$(declare -f run_apply); $(declare -p WORK BIN APPLY GH_BASH); run_apply \"\$@\"" _ \
+    timeout 30 bash -c "$(declare -f run_apply); $(declare -p WORK BIN APPLY); run_apply \"\$@\"" _ \
     "${WORK}/d" MINIFIED_ASSETS="$TOKEN"
 else
   skip "a named pipe where an asset should be (this platform cannot create FIFOs)"

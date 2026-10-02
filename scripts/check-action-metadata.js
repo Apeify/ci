@@ -17,10 +17,10 @@
 //
 // WHY NOTHING ELSE CATCHES IT
 //
-// actionlint cannot read composite actions at all. validate.yml's extractor
-// checks `runs.using` and `shell:`, but a description containing an expression
-// is perfectly valid YAML. The test suite drives extracted shell and never sees
-// metadata. This class had zero coverage, which is how it reached a deploy.
+// actionlint cannot read composite actions at all. Layer 1
+// (check-workflow-structure.js) checks `runs.using` and `shell:`, but a
+// description containing an expression is perfectly valid YAML. The test suite
+// runs the action's scripts and never sees metadata. This class had zero coverage, which is how it reached a deploy.
 //
 // WHY THIS PARSES THE YAML
 //

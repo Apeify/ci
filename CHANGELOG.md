@@ -11,6 +11,38 @@ Dependabot shows the matching section of this file in the pull request that bump
 read it there before merging. Pin by commit SHA as described in
 [README.md](README.md#versioning), and take the SHA with `git rev-list -n 1 <tag>`.
 
+## [3.0.1] - 2026-10-02
+
+No action required. Apart from the one fix below, which no correctly configured site can notice, the
+deploy action does exactly what it did; only where its shell lives has changed.
+
+### Fixed
+
+- **An `environment` input with leading or trailing whitespace is refused.** The production checks
+  compared the exact name, so a value such as `" production"` skipped both of them - the refusal to
+  deploy production from any ref but `main`, and the refusal of a commit `staging` never carried.
+  The stub passes `needs.lint-and-test.outputs.environment`, which cannot contain whitespace, so
+  only a hand-written value was ever exposed.
+
+### Changed
+
+- **The deploy action's shell moved out of `action.yml` into files.** Every multi-line step now runs
+  a script from [`actions/deploy/scripts/`](actions/deploy/scripts/), found through
+  `$GITHUB_ACTION_PATH`, so the scripts are pinned exactly as the action is. The code is moved, not
+  rewritten, with one exception: "Show deploy target" now receives the action's repository and ref
+  through `env:` instead of splicing `${{ github.action_* }}` into its shell. The log line is the
+  same; a ref containing `$(...)` can no longer execute.
+- **Shared helpers are defined once.** `norm_path` existed in three steps and `emit_transfer_stats`
+  in two, because steps are separate shells. Both now live in
+  [`actions/deploy/scripts/lib.sh`](actions/deploy/scripts/lib.sh) with `check_relative_dir`
+  and `reject_repo_root`.
+- **The deploy's shell is shellchecked for the first time.** Inline in a composite action, none of
+  it was. It came back clean.
+- **The tests run the scripts as shipped** instead of cutting the shell out of the YAML with awk. A
+  new `tests/action-wiring.test.sh` checks what only a runner would otherwise discover: that each
+  step names a script that exists, that every script is used, and that each sets the shell options
+  it was written against.
+
 ## [3.0.0] - 2026-10-02
 
 The deploy job no longer runs any third-party code. CSS and JS minification, which ran `esbuild`
@@ -152,6 +184,7 @@ with "workflow was not found".
 First release: a reusable `deploy.yml` workflow (lint and test, then rsync over SSH to one or more
 web roots), the `promote.yml` publish button, and example stubs.
 
+[3.0.1]: https://github.com/Apeify/ci/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Apeify/ci/releases/tag/v3.0.0
 [2.1.0]: https://github.com/Apeify/ci/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Apeify/ci/releases/tag/v2.0.0

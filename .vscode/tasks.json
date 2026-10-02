@@ -4,17 +4,23 @@
 	// These run inside the dev container, which provisions actionlint and
 	// shellcheck (see .devcontainer/). Outside it, they will not resolve.
 	//
-	// These cover four of CI's five layers. The one they do NOT cover is
-	// validate.yml's extractor - the js-yaml parse, the runs.using check and
-	// the missing-shell check - which needs Node and js-yaml. That is also the
-	// ONLY automated schema check the composite action gets, since actionlint
-	// cannot read one, so push-and-watch remains the way to catch a malformed
-	// action.yml. Where CI and a task run the
-	// same non-trivial logic, that logic lives in scripts/ and both call it -
-	// duplicating it here would reintroduce the drift these checks exist to
-	// catch.
+	// These cover all five of CI's layers, by running the same scripts CI
+	// runs. Where CI and a task run the same non-trivial logic, that logic
+	// lives in scripts/ and both call it - duplicating it here would
+	// reintroduce the drift these checks exist to catch.
 	"version": "2.0.0",
 	"tasks": [
+		{
+			// Layer 1: every workflow, example and composite action parses as
+			// YAML, every composite action declares runs.using and a shell for
+			// each run step, and every `run:` block parses as bash. The only
+			// schema check the composite action gets, since actionlint cannot
+			// read one. Needs js-yaml, which the container installs.
+			"label": "Check workflow structure",
+			"type": "shell",
+			"command": "bash scripts/check-workflow-structure.sh",
+			"problemMatcher": []
+		},
 		{
 			// Parses every workflow against the Actions schema, checks the
 			// expressions inside ${{ }}, and runs shellcheck over each `run:`
@@ -80,7 +86,7 @@
 			"problemMatcher": []
 		},
 		{
-			// Extracts the shell from actions/deploy/action.yml and runs it
+			// Runs the deploy action's scripts the way the action does,
 			// against known-good and known-bad configurations. The only check
 			// here that tests BEHAVIOR rather than form, and the only one that
 			// needs nothing the container installs - bash, awk and git are
@@ -94,11 +100,12 @@
 			// Everything, in order. Ctrl+Shift+B.
 			//
 			// dependsOrder is "sequence" rather than the default parallel so the
-			// output stays readable: five checks interleaving into one terminal
+			// output stays readable: six checks interleaving into one terminal
 			// is hard to attribute.
 			"label": "Validate all",
 			"dependsOrder": "sequence",
 			"dependsOn": [
+				"Check workflow structure",
 				"Validate workflows and examples",
 				"Check README matches examples",
 				"Shellcheck scripts",

@@ -42,7 +42,7 @@ cd "$(dirname "$0")/.." || exit 1
 ACTIONLINT="${ACTIONLINT:-actionlint}"
 
 # Both extensions everywhere. GitHub accepts either in .github/workflows,
-# validate.yml's extractor already matches /\.ya?ml$/, and .github/actionlint.yaml
+# check-workflow-structure.js already matches /\.ya?ml$/, and .github/actionlint.yaml
 # scopes its own suppression to **/*.{yml,yaml} - so a workflow added as .yaml is
 # a shape the rest of the repo already expects. Globbing only *.yml would skip it
 # WITHOUT tripping the guards below, because the existing .yml files keep each

@@ -242,13 +242,16 @@ is what guarantees third-party test code never shares a runner with the deploy
 key. Convert it to an action "for symmetry" and both halves land in one job's
 steps, and the guarantee is gone with no error anywhere.
 
-The costs of the split are worth stating plainly. actionlint does not understand
-composite actions - it parses `action.yml` as a workflow and reports nonsense -
-so the deploy half has no schema linting and no actionlint-driven shellcheck.
-[`tests/`](tests/) and validate.yml's extractor are its entire automated
-coverage, which is why the extractor checks `runs.using` and rejects a `run:`
-step with no `shell:`. And `vars` is unavailable inside a composite action
-altogether, so web roots arrive as an input rather than being read from context.
+The costs of the split are worth stating plainly. actionlint does not understand composite actions -
+it parses `action.yml` as a workflow and reports nonsense - so the deploy half gets no schema
+linting from it. Layer 1 and the metadata check stand in for that, which is why layer 1 checks
+`runs.using` and rejects a `run:` step with no `shell:`. The shell itself no longer depends on
+actionlint at all: every multi-line step runs a file from
+[`actions/deploy/scripts/`](actions/deploy/scripts/), which layer 4's shellcheck covers and the
+tests run directly. [`tests/action-wiring.test.sh`](tests/action-wiring.test.sh) checks the one
+thing that only happens on a runner: that each step still names a script that exists. And `vars`
+is unavailable inside a composite action altogether, so web roots arrive as an input rather than
+being read from context.
 
 There is also no wrapper reusable workflow, deliberately. `uses:` accepts no
 expressions and `uses: ./...` inside a reusable workflow resolves against the
@@ -301,9 +304,13 @@ layers.
 
 ### 1. A structural floor
 
-Parse every workflow as YAML, extract each `run:` block to its own script, and
-confirm each parses as shell (`bash -n`). This covers the two failure classes
-that have actually broken this code:
+[`scripts/check-workflow-structure.sh`](scripts/check-workflow-structure.sh) parses every
+workflow, example and composite action as YAML, extracts each `run:` block to its own script, and
+confirms each parses as shell (`bash -n`). For a composite action it also checks `runs.using` and
+that every `run:` step declares a `shell:`, which actionlint cannot. It used to be JavaScript in a
+heredoc inline in validate.yml, which left it unlinted and made it the one layer that could not be
+run locally; it is now a script CI and the VS Code task both run. This covers the two failure
+classes that have actually broken this code:
 
 1. **A workflow that no longer parses** - the usual result of an edit that drops
    or adds a level of indentation.
@@ -314,10 +321,9 @@ GitHub expressions are replaced with a plain identifier first. `${{ ... }}` is
 not shell - bash reads `${{` as a parameter expansion with an invalid name - so
 leaving them in would produce errors that say nothing about the script.
 
-This step installs `js-yaml` from npm. An earlier version of this section called
-it self-contained and said it "still works when a download does not", which was
-never true of a step whose first action is `npm install`. Layer 5 is the one
-that genuinely needs nothing installed.
+It needs `js-yaml` from npm. An earlier version of this section called it self-contained and said
+it "still works when a download does not", which was never true of a step whose first action is
+`npm install`. Layer 5 is the one that genuinely needs nothing installed.
 
 ### 2. [actionlint](https://github.com/rhysd/actionlint)
 
@@ -378,9 +384,11 @@ A stale README stub is worse than no stub, because it gets copied.
 
 ### 4. `shellcheck` over the standalone scripts
 
-`.devcontainer/setup.sh` and everything in `scripts/` and [`tests/`](tests/) are
-shell, but they are not workflow `run:` blocks, so actionlint never sees them.
-Without this step nothing would check them at all.
+`.devcontainer/setup.sh` and everything in `scripts/`,
+[`actions/deploy/scripts/`](actions/deploy/scripts/) and [`tests/`](tests/) are shell, but
+they are not workflow `run:` blocks, so actionlint never sees them. Without this step nothing
+would check them at all. For the deploy action that was true of all its shell until it moved out
+of `action.yml` into files: inline in a composite action, no layer shellchecked it.
 
 That gap was not hypothetical - a broken `shellcheck` directive in `setup.sh`
 was found only by running the equivalent VS Code task by hand, which is what
@@ -418,7 +426,7 @@ explaining that `vars` is unavailable was itself unavailable.
 **Nothing else could have caught it.** actionlint cannot read composite actions.
 The layer-1 extractor parses the YAML and checks `runs.using` and `shell:`, but
 a description containing an expression is perfectly valid YAML. The test suite
-drives extracted shell and never sees metadata. The class had zero coverage
+drove extracted shell and never saw metadata. The class had zero coverage
 across all five layers, which is exactly how it reached a deploy.
 
 **It parses the YAML, and the first version's failure is worth recording.** That
@@ -432,7 +440,7 @@ line. And it rejected a folded `value: >-`, any four-space-indented action, and
 any output using `fromJSON()` or `format()`.
 
 Structure cannot be recovered from line shapes. Parsing costs a js-yaml
-dependency - which is why it runs after the extractor step that installs it,
+dependency - which is why it runs after the step that installs it,
 rather than before the downloads as an earlier version of this section claimed.
 
 [`tests/action-metadata.test.sh`](tests/action-metadata.test.sh) covers all seven
@@ -455,18 +463,20 @@ reached a consuming site was well-formed shell that behaved wrongly:
 
 None of the four layers above can see any of that. actionlint passes all three.
 
-**The tests extract the shell from the workflow rather than restating it.**
-[`tests/lib/harness.sh`](tests/lib/harness.sh) pulls a step's `run:` body, or a
-single function, back out of
-[actions/deploy/action.yml](actions/deploy/action.yml) with awk
-and runs it. A copy of the logic maintained under `tests/` would keep passing
-while the workflow was broken, which is the failure this layer exists to
-prevent. Extraction is structural, so every extractor asserts a sentinel and
-aborts loudly rather than testing an empty string.
+**The tests run the shipping code rather than restating it.** The deploy action's steps are files
+in [`actions/deploy/scripts/`](actions/deploy/scripts/), and the tests run them exactly as the
+action does, `bash <file>`. A copy of the logic maintained under `tests/` would keep passing while
+the action was broken, which is the failure this layer exists to prevent.
 
-The preflight step is driveable this way because it reads every value from the
-environment and contains no GitHub expressions of its own. Keep it that way: an
-inline expression there would take the step out of test coverage.
+Each script reads every value from the environment, which the step's `env:` block supplies, so it
+can be driven directly. A script cannot contain a GitHub expression - nothing would evaluate it -
+and the wiring test refuses one.
+
+The reusable workflows are the exception. Their shell cannot live in files, because nothing from
+this repo is on disk when a consumer's job runs them, so for `minify.yml`
+[`tests/lib/harness.sh`](tests/lib/harness.sh) pulls a step's `run:` body back out of the YAML
+with awk. That extraction is structural, so it asserts a sentinel and aborts loudly rather than
+testing an empty string.
 
 It needs bash, awk and git and nothing else - no network, no npm - so it runs
 anywhere, including outside the dev container.
@@ -483,7 +493,7 @@ did, until it was tightened.
 
 **How to know the suite still works: delete a guard and watch it fail.** A test
 that cannot fail is worse than no test, and this suite has twice been found
-green against an `action.yml` with a guard removed. The check is mechanical:
+green against an action with a guard removed. The check is mechanical:
 
 ```bash
 mkdir -p /tmp/mut && tar --exclude=node_modules -cf - . | (cd /tmp/mut && tar -xf -)
@@ -494,10 +504,11 @@ to publish `deployed-sha`, so a copy without it fails every success-path
 assertion with "not a git repository" - 74 failures that say nothing about the
 mutation you were testing.
 
-Then, inside the copy, delete one `check_relative_dir` or `reject_repo_root`
-call, or one `case` in the web-root overlap loop, and run `bash tests/run.sh`.
+Then, inside the copy, delete one `check_relative_dir` or `reject_repo_root` call, or one `case`
+in the web-root overlap loop, in `actions/deploy/scripts/preflight.sh`, and run
+`bash tests/run.sh`.
 It must fail, and it must fail naming that guard. Work in a copy: mutation
-testing edits the action, and a half-restored `action.yml` is a bad thing to
+testing edits the action, and a half-restored script is a bad thing to
 leave in a working tree.
 
 **Verify the mutation applied before believing a pass.** This is the rule that
@@ -522,19 +533,24 @@ Open the repo in VS Code and choose **Reopen in Container**
 and the same pinned actionlint that CI uses.
 
 Then press **Ctrl+Shift+B**, or Terminal → Run Task → **Validate all**.
-[`.vscode/tasks.json`](.vscode/tasks.json) defines five check tasks plus the
+[`.vscode/tasks.json`](.vscode/tasks.json) defines six check tasks plus the
 chain that runs them:
 
 | Task | Runs |
 |---|---|
+| Check workflow structure | [`scripts/check-workflow-structure.sh`](scripts/check-workflow-structure.sh) - layer 1: YAML parses, action structure, `run:` blocks parse |
 | Validate workflows and examples | [`scripts/lint-workflows.sh`](scripts/lint-workflows.sh) - `actionlint` over every workflow |
 | Check README matches examples | `scripts/check-readme-examples.sh` |
 | Shellcheck scripts | `shellcheck` over every `*.sh` in the working tree |
 | Check action metadata | [`scripts/check-action-metadata.sh`](scripts/check-action-metadata.sh) - no expressions in action metadata |
 | Run tests | [`tests/run.sh`](tests/run.sh) - the behavior suite |
-| **Validate all** | all five, in order (the default build task) |
+| **Validate all** | all six, in order (the default build task) |
 
 Or directly:
+
+```bash
+bash scripts/check-workflow-structure.sh
+```
 
 ```bash
 bash scripts/lint-workflows.sh
@@ -561,8 +577,9 @@ The container exists because this repo cannot deploy anything on its own, so
 without it the first place a broken change gets exercised is a real site's
 pipeline. Catching it locally is considerably cheaper.
 
-Both the container and CI read their actionlint version and checksums from
-[`.actionlint-version`](.actionlint-version), so there is one place to bump and
-no way for local checks and CI to validate against different versions. It
-carries hashes for `linux/amd64` and `linux/arm64` - CI is always amd64, and a
-container on Apple Silicon is arm64.
+Both the container and CI install actionlint through
+[`scripts/install-actionlint.sh`](scripts/install-actionlint.sh), which reads the version and
+checksums from [`.actionlint-version`](.actionlint-version) and verifies the download before
+extracting it, so there is one place to bump, one checksum check, and no way for local checks and
+CI to validate against different versions. It carries hashes for `linux/amd64` and `linux/arm64` -
+CI is always amd64, and a container on Apple Silicon is arm64.

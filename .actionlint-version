@@ -1,8 +1,9 @@
 # Pinned actionlint release, shared by CI and the dev container.
 #
-# Sourced by BOTH .github/workflows/validate.yml and .devcontainer/setup.sh, so
-# there is exactly one place to bump and no way for the two to disagree about
-# which version they are checking against. A version and a checksum that drift
+# Read by scripts/install-actionlint.sh, which both
+# .github/workflows/validate.yml and .devcontainer/setup.sh run, so there is
+# exactly one place to bump and no way for the two to disagree about which
+# version they are checking against. A version and a checksum that drift
 # apart is the failure this file exists to prevent.
 #
 # The checksum is the real pin. A version tag is mutable: if a release were

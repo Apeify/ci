@@ -2,23 +2,23 @@
 # Shared machinery for the tests in this directory.
 #
 # The whole point of these tests is that they exercise the SHIPPING code, not a
-# transcription of it. The shell that matters lives inside `run:` blocks in
-# actions/deploy/action.yml, so the harness pulls those blocks back out of the
-# YAML and runs them.
+# transcription of it. A copy of the logic maintained here would pass while the
+# real thing was broken, which is the failure mode the tests exist to prevent.
 #
-# That file is a composite action rather than a workflow, which matters twice
-# over. Its steps sit two spaces shallower than a job's, which the extractor
-# handles because it strips leading whitespace before matching and takes the
-# body indent from the first content line. And actionlint does not understand
-# composite actions at all - it parses action.yml as a workflow and reports
-# nonsense - so these tests are the ONLY automated check on that shell. A copy of the logic maintained here would pass while
-# the workflow was broken, which is the failure mode the tests exist to prevent.
+# Most of that code is ordinary files: every multi-line step of
+# actions/deploy/action.yml runs a script from actions/deploy/scripts/, and the
+# tests run those scripts directly, the way the action does.
+#
+# The exception is the reusable workflows. A workflow's `run:` blocks cannot
+# live in files of their own - nothing from this repo is on disk when a
+# consumer's job runs one - so for minify.yml the harness pulls a step's block
+# back out of the YAML and runs that.
 #
 # Extraction is done with awk rather than a YAML parser on purpose: these tests
 # must run with nothing installed, so that a broken change can be caught before
 # a network-dependent step even starts. The trade is that extraction is
-# structural, so every extractor below asserts a sentinel and aborts loudly if
-# it comes back with nothing recognizable. A test harness that silently tests an
+# structural, so the extractor asserts a sentinel and aborts loudly if it
+# comes back with nothing recognizable. A test harness that silently tests an
 # empty string is worse than no harness.
 
 set -uo pipefail
@@ -28,22 +28,29 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TESTS_RUN=0
 TESTS_FAILED=0
 
-# DEPLOY_ACTION and GH_BASH are read by the *.test.sh files that source this
-# one, which shellcheck cannot see from here - hence the narrow disable rather
-# than exporting them into the environment of every command the tests run.
+# These are read by the *.test.sh files that source this one, which shellcheck
+# cannot see from here - hence the narrow disables rather than exporting them
+# into the environment of every command the tests run.
 #
-# GH_BASH matters: GitHub runs `shell: bash` steps as
-# `bash --noprofile --norc -eo pipefail`, and anything else would test a
+# Run a deploy script as the action does: `bash <file>`. Each script sets the
+# options GitHub would have given it inline (`set -eo pipefail`), and
+# tests/action-wiring.test.sh checks that every one does.
+#
+# GH_BASH is for EXTRACTED workflow steps, which have no such line: GitHub runs
+# them as `bash --noprofile --norc -eo pipefail`, and anything else would test a
 # different language. `-e` in particular changes what a failing command inside
 # a guard does.
 # shellcheck disable=SC2034
 DEPLOY_ACTION="${REPO_ROOT}/actions/deploy/action.yml"
 # shellcheck disable=SC2034
+DEPLOY_SCRIPTS="${REPO_ROOT}/actions/deploy/scripts"
+# shellcheck disable=SC2034
 GH_BASH=(bash --noprofile --norc -eo pipefail)
 
 # ---------------------------------------------------------------- extraction
 
-# Pull one step's `run:` body out of a workflow, dedented.
+# Pull one step's `run:` body out of a workflow, dedented. Used for the reusable
+# workflows, whose shell cannot live in files - see the top of this file.
 #
 # $1 workflow path, $2 exact step name as it appears after `- name: `.
 extract_run_step() {
@@ -66,37 +73,6 @@ extract_run_step() {
   if [ -z "$out" ]; then
     echo "HARNESS ERROR: no run: body found for step '${name}' in ${file}." >&2
     echo "The step was renamed, or its indentation changed. Fix the extractor." >&2
-    exit 2
-  fi
-  printf '%s\n' "$out"
-}
-
-# Pull one shell function definition out of an already-extracted script.
-#
-# $1 file containing shell, $2 function name. Assumes the closing brace sits at
-# the same indentation as the definition, which is true throughout action.yml
-# and is verified by the `bash -n` check in require_shell below.
-extract_function() {
-  local file="$1" fn="$2" out
-  out=$(awk -v fn="$fn" '
-    function bare(s) { sub(/^[ \t]*/, "", s); return s }
-    state == 0 {
-      if (bare($0) == fn "() {") {
-        match($0, /^ */); indent = RLENGTH
-        state = 1
-        print substr($0, indent + 1)
-      }
-      next
-    }
-    state == 1 {
-      match($0, /^ */); cur = RLENGTH
-      print substr($0, indent + 1)
-      if (cur == indent && bare($0) == "}") exit
-    }
-  ' "$file")
-
-  if [ -z "$out" ]; then
-    echo "HARNESS ERROR: function '${fn}' not found in ${file}." >&2
     exit 2
   fi
   printf '%s\n' "$out"

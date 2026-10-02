@@ -5,12 +5,13 @@
   // gets exercised is a real site's pipeline.
   //
   // Installs shellcheck and the same pinned actionlint that CI uses, plus Node
-  // for the YAML/shell extractor in validate.yml.
+  // for the YAML checks (scripts/check-workflow-structure.sh and
+  // scripts/check-action-metadata.sh).
   "name": "Apeify CI workflows",
   "image": "mcr.microsoft.com/devcontainers/base:bookworm",
   "features": {
-    // Node is needed by validate.yml's extractor step, which parses the
-    // workflows with js-yaml, and by the JS-validity cases in
+    // Node is needed by the YAML checks, which parse the workflows with
+    // js-yaml, and by the JS-validity cases in
     // tests/minified-assets.test.sh, which are skipped without it.
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"

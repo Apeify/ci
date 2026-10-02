@@ -13,12 +13,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-extract_run_step "$DEPLOY_ACTION" "Rsync public/ contents into each web root" > "${WORK}/public.sh"
-require_shell "${WORK}/public.sh" "emit_transfer_stats"
-extract_function "${WORK}/public.sh" "emit_transfer_stats" > "${WORK}/fn.sh"
-require_shell "${WORK}/fn.sh" "paths-deleted"
-# shellcheck source=/dev/null
-source "${WORK}/fn.sh"
+# shellcheck source=../actions/deploy/scripts/lib.sh
+source "${DEPLOY_SCRIPTS}/lib.sh"
 
 # The helper writes to $GITHUB_OUTPUT; give it one and read it back.
 stats() {
@@ -93,21 +89,5 @@ describe "an empty log does not crash or report a change"
 : > "${WORK}/empty"
 assert_eq "false" "$(field "${WORK}/empty" changed)" "empty log reports unchanged"
 assert_eq "0" "$(field "${WORK}/empty" paths-deleted)" "empty log counts zero"
-
-describe "both copies of the helper must not drift apart"
-# emit_transfer_stats is defined once in each rsync step, because Actions steps
-# are separate shells. Only the public copy is exercised above, so a change made
-# to one and not the other would leave the app sync miscounting while every
-# assertion in this file still passed. Measured, not assumed: deleting the app
-# copy's deletion count left the whole suite green.
-#
-# Same guard the norm_path test applies, for the same reason, using the same
-# already-tested extractor rather than new parsing.
-extract_run_step "$DEPLOY_ACTION" "Rsync app directory above the web roots" > "${WORK}/app.sh"
-require_shell "${WORK}/app.sh" "emit_transfer_stats"
-extract_function "${WORK}/app.sh" "emit_transfer_stats" > "${WORK}/fn-app.sh"
-
-assert_eq "$(cat "${WORK}/fn.sh")" "$(cat "${WORK}/fn-app.sh")" \
-  "the public and app copies of emit_transfer_stats are identical"
 
 finish

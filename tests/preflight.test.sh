@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Integration tests for the deploy action's preflight step, run as one script the way
-# GitHub runs it.
+# Integration tests for the deploy action's preflight step
+# (actions/deploy/scripts/preflight.sh), run the way the action runs it.
 #
 # path-rules.test.sh covers the helpers in isolation. This file covers how they
 # are COMPOSED, which is where the defects have actually been: a check placed
@@ -8,8 +8,8 @@
 # comparison whose two sides were normalized differently. Every one of those
 # passed a unit test of the individual function.
 #
-# The step reads every value from the environment - it contains no `${{ }}` of
-# its own - so it can be driven directly.
+# The script reads every value from the environment, so it can be driven
+# directly.
 
 # shellcheck source=lib/harness.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
@@ -17,9 +17,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-PREFLIGHT="${WORK}/preflight.sh"
-extract_run_step "$DEPLOY_ACTION" "Preflight - check configuration" > "$PREFLIGHT"
-require_shell "$PREFLIGHT" "WEB_ROOT_DIRS"
+PREFLIGHT="${DEPLOY_SCRIPTS}/preflight.sh"
 
 # A known-good configuration. Each test overrides only what it is about, so a
 # failure points at the value that changed rather than at the whole environment.
@@ -45,7 +43,7 @@ preflight() {
     "GITHUB_OUTPUT=${WORK}/github_output"
   )
   : > "${WORK}/github_output"
-  env -i PATH="$PATH" HOME="$HOME" "${env[@]}" "$@" "${GH_BASH[@]}" "$PREFLIGHT"
+  env -i PATH="$PATH" HOME="$HOME" "${env[@]}" "$@" bash "$PREFLIGHT"
 }
 
 describe "a valid configuration passes"
@@ -138,6 +136,22 @@ assert_exit 1 "a whitespace-only environment is refused" preflight "RESOLVED_ENV
 # empty value must never be treated as 'staging' and waved through.
 assert_output_contains "'environment' input is empty" "whitespace is refused the same way" \
   preflight "RESOLVED_ENVIRONMENT=	"
+
+describe "REGRESSION the environment input must not carry surrounding whitespace"
+# Shipped through 3.0.0. The production test compares the whole lowercased
+# string, so ' production' passed the empty check, failed `= production`, and
+# skipped BOTH production refusals - deploying a non-main ref, or a commit
+# staging never carried, to whatever environment the caller's job entered.
+# Run from the default staging ref, where a production deploy must be refused.
+for bad in " production" "production " "	production" " Production " " staging" "dr "; do
+  assert_output_contains "leading or trailing whitespace" "environment '${bad}' is refused, and named" \
+    preflight "RESOLVED_ENVIRONMENT=${bad}"
+  assert_exit 1 "environment '${bad}' fails the preflight" preflight "RESOLVED_ENVIRONMENT=${bad}"
+done
+# Interior whitespace is not this check's business: such a name cannot equal
+# 'production', and refusing it here would be a guess about GitHub's naming
+# rules. lint-and-test.yml refuses it in its own override.
+assert_exit 0 "an ordinary name passes" preflight RESOLVED_ENVIRONMENT=dr
 
 describe "missing configuration is refused, and named"
 assert_exit 1 "missing SSH key" preflight DEPLOY_SSH_KEY=

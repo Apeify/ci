@@ -16,11 +16,12 @@ name: Validate workflows
 #
 # FIVE LAYERS, ON PURPOSE
 #
-# 1. A structural floor: parse every workflow as YAML, then syntax-check the
-#    shell embedded in each `run:` block. It covers the two failure classes that
-#    have actually broken this code - a file that stops parsing after an
-#    indentation slip, and a `run:` block whose shell is broken and stays
-#    invisible until it executes on a live deploy.
+# 1. A structural floor (scripts/check-workflow-structure.sh): parse every
+#    workflow as YAML, then syntax-check the shell embedded in each `run:`
+#    block. It covers the two failure classes that have actually broken this
+#    code - a file that stops parsing after an indentation slip, and a `run:`
+#    block whose shell is broken and stays invisible until it executes on a
+#    live deploy.
 #
 #    This step needs js-yaml from npm. An earlier version of this comment called
 #    it self-contained and claimed it "still works if a download fails", which
@@ -39,8 +40,9 @@ name: Validate workflows
 #    same text inline. Nothing but this step stops the two from disagreeing,
 #    and a stale README stub is worse than none - it gets copied.
 #
-# 4. shellcheck over the standalone *.sh scripts. actionlint never sees them;
-#    they are not `run:` blocks. This is a real gap rather than a theoretical
+# 4. shellcheck over the standalone *.sh scripts, including the deploy action's
+#    steps in actions/deploy/scripts/. actionlint never sees them; they are
+#    not `run:` blocks. This is a real gap rather than a theoretical
 #    one - see the step itself.
 #
 #    Layer 2 also cannot see actions/*/action.yml at all, so a separate check
@@ -49,8 +51,8 @@ name: Validate workflows
 #    mentioned an expression took every consumer down before a step ran. It
 #    parses the YAML, so it needs js-yaml the same way layer 1 does.
 #
-# 5. The test suite in tests/, which pulls the shell back OUT of actions/deploy/action.yml and
-#    runs it. Layers 1 to 4 all ask whether the code is well-formed; this one
+# 5. The test suite in tests/, which runs the deploy action's scripts as the
+#    action does. Layers 1 to 4 all ask whether the code is well-formed; this one
 #    asks whether it does the right thing. Every defect that has reached a
 #    consuming site was well-formed shell that behaved wrongly - a guard above
 #    the gate meant to skip it, two sides of a comparison normalized
@@ -96,188 +98,33 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Parse every workflow, and write each `run:` block out as its own script
-      # for the two checks that follow.
+      # js-yaml, for the two checks that parse YAML: layer 1 below and the
+      # action-metadata check. Pinned to an exact version, the same way
+      # minify.yml pins esbuild. Node is preinstalled on the runner; a YAML
+      # parser is not.
       #
-      # js-yaml pinned to an exact version, the same way minify.yml pins
-      # esbuild. Node is preinstalled on the runner; a YAML parser is not.
-      #
-      # GitHub expressions are substituted out before the scripts are written.
-      # `${{ ... }}` is not shell - bash reads `${{` as a parameter expansion
-      # with an invalid name - so leaving them in would produce failures that
-      # say nothing about the actual script. Replacing them with a plain
-      # identifier preserves the surrounding syntax, which is what is being
-      # checked.
-      - name: Parse workflows and extract embedded shell
+      # Installed rather than resolved out of an npx cache: one predictable
+      # path, no branch that behaves differently depending on what the runner
+      # image happens to have warmed.
+      - name: Install js-yaml
         shell: bash
-        run: |
-          mkdir -p /tmp/steps
+        run: npm install --no-save --silent js-yaml@4.1.0
 
-          # Installed rather than resolved out of an npx cache: one predictable
-          # path, no branch that behaves differently depending on what the
-          # runner image happens to have warmed.
-          npm install --no-save --silent js-yaml@4.1.0
-
-          cat > /tmp/extract.js <<'JS'
-          const fs = require('fs');
-          const path = require('path');
-          const yaml = require(process.argv[2]);
-
-          const dir = '.github/workflows';
-          let extracted = 0;
-          let failed = false;
-
-          for (const file of fs.readdirSync(dir).filter(f => /\.ya?ml$/.test(f)).sort()) {
-            const full = path.join(dir, file);
-            let doc;
-            try {
-              doc = yaml.load(fs.readFileSync(full, 'utf8'));
-            } catch (e) {
-              console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
-              failed = true;
-              continue;
-            }
-            console.log(`parsed ${full}`);
-
-            for (const [jobName, job] of Object.entries(doc.jobs || {})) {
-              for (const [i, step] of (job.steps || []).entries()) {
-                if (!step.run) continue;
-                const body = step.run.replace(/\$\{\{[^}]*\}\}/g, 'GH_EXPR');
-                const label = (step.name || `step${i}`).replace(/[^A-Za-z0-9]+/g, '_');
-                const out = `/tmp/steps/${path.parse(file).name}__${jobName}__${label}.sh`;
-                fs.writeFileSync(out, '#!/usr/bin/env bash\n' + body);
-                extracted++;
-              }
-            }
-          }
-
-          // Parse everything under examples/ too, at both levels, without
-          // extracting from it.
-          //
-          // The stubs in examples/workflows/ reach actionlint via
-          // scripts/lint-workflows.sh,
-          // but examples/dependabot.yml deliberately does not - actionlint
-          // rejects a Dependabot config outright - which left the one copyable
-          // artifact in the repo with no syntax coverage at all. A YAML parse is
-          // not a schema check, but it catches the failure that matters for a
-          // file people copy: one that does not load.
-          let examplesParsed = 0;
-          for (const dir of ['examples', 'examples/workflows']) {
-            if (!fs.existsSync(dir)) continue;
-            for (const file of fs.readdirSync(dir).filter(f => /\.ya?ml$/.test(f)).sort()) {
-              const full = path.join(dir, file);
-              try {
-                yaml.load(fs.readFileSync(full, 'utf8'));
-              } catch (e) {
-                console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
-                failed = true;
-                continue;
-              }
-              console.log(`parsed ${full}`);
-              examplesParsed++;
-            }
-          }
-
-          // Composite actions too, and this is not a nicety: actionlint parses
-          // action.yml as a workflow and reports nonsense, so it provides NO
-          // schema check and NO shellcheck for the deploy half of the pipeline.
-          // This extraction, plus tests/, is the whole of its automated coverage.
-          //
-          // Steps live under runs.steps rather than jobs.<id>.steps.
-          let actionsParsed = 0;
-          for (const dir of fs.existsSync('actions') ? fs.readdirSync('actions') : []) {
-            for (const name of ['action.yml', 'action.yaml']) {
-              const full = path.join('actions', dir, name);
-              if (!fs.existsSync(full)) continue;
-              let doc;
-              try {
-                doc = yaml.load(fs.readFileSync(full, 'utf8'));
-              } catch (e) {
-                console.log(`::error file=${full}::YAML parse failed: ${e.message}`);
-                failed = true;
-                continue;
-              }
-              console.log(`parsed ${full}`);
-              actionsParsed++;
-
-              if (!doc.runs || doc.runs.using !== 'composite') {
-                console.log(`::error file=${full}::runs.using is not "composite".`);
-                failed = true;
-                continue;
-              }
-              for (const [i, step] of (doc.runs.steps || []).entries()) {
-                if (!step.run) continue;
-                // GitHub rejects a composite run step with no explicit shell, and
-                // it is the kind of omission that only surfaces at run time.
-                if (!step.shell) {
-                  console.log(`::error file=${full}::step "${step.name || i}" has run: but no shell:.`);
-                  failed = true;
-                }
-                const body = step.run.replace(/\$\{\{[^}]*\}\}/g, 'GH_EXPR');
-                const label = (step.name || `step${i}`).replace(/[^A-Za-z0-9]+/g, '_');
-                fs.writeFileSync(`/tmp/steps/action__${dir}__${label}.sh`, '#!/usr/bin/env bash\n' + body);
-                extracted++;
-              }
-            }
-          }
-
-          if (fs.existsSync('actions') && actionsParsed === 0) {
-            console.log('::error::actions/ exists but no action.yml was parsed - the filter is wrong.');
-            process.exit(1);
-          }
-
-          console.log(`extracted ${extracted} run-step(s)`);
-          if (examplesParsed === 0) {
-            console.log('::error::No examples were parsed - examples/ moved, or the filter is wrong.');
-            process.exit(1);
-          }
-          if (failed) process.exit(1);
-          if (extracted === 0) {
-            console.log('::error::No run-steps were extracted - the extractor is probably broken.');
-            process.exit(1);
-          }
-          JS
-
-          node /tmp/extract.js "$PWD/node_modules/js-yaml"
-
-      - name: Check embedded shell parses
+      # Layer 1. Every workflow, example and composite action parses as YAML,
+      # every composite action follows the rules actionlint cannot check, and
+      # every `run:` block parses as bash. The script's header says what and
+      # why; the VS Code "Check workflow structure" task runs the same file.
+      - name: Check workflow structure
         shell: bash
-        run: |
-          fail=0
-          for s in /tmp/steps/*.sh; do
-            if ! bash -n "$s" 2>/tmp/err; then
-              echo "::error::bash syntax error in $(basename "$s")"
-              sed 's/^/    /' /tmp/err
-              fail=1
-            fi
-          done
-          [ "$fail" -eq 0 ] && echo "all run-steps parse as bash"
-          exit "$fail"
+        run: bash scripts/check-workflow-structure.sh
 
-      # Version and hashes come from .actionlint-version, which the dev
-      # container's setup script reads too. One place to bump, and no way for
-      # local checks and CI to end up validating against different versions.
-      #
-      # The checksum is the actual pin. A version tag alone is mutable - if the
-      # release were ever re-cut under the same tag, the tag would still resolve
-      # and the download would silently change. Verifying against a hash stored
-      # in this repo means that swap fails the build instead.
-      #
-      # Verify before extracting or running: the point of a checksum is to be
-      # checked while the artifact is still inert.
+      # scripts/install-actionlint.sh downloads the release pinned in
+      # .actionlint-version and verifies it against the committed checksum
+      # before extracting anything. The dev container installs through the same
+      # script, so local checks and CI cannot end up on different versions.
       - name: Install actionlint
         shell: bash
-        run: |
-          . ./.actionlint-version
-
-          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
-
-          curl -sSfL --retry 3 --max-time 120 -o "/tmp/${archive}" "$url"
-          echo "${ACTIONLINT_SHA256_LINUX_AMD64}  /tmp/${archive}" | sha256sum --check --strict -
-
-          tar -xzf "/tmp/${archive}" -C /tmp actionlint
-          /tmp/actionlint --version
+        run: bash scripts/install-actionlint.sh /tmp
 
       # actionlint finds .github/workflows itself. shellcheck is preinstalled on
       # the runner image, and actionlint invokes it on `run:` blocks when present.
@@ -295,8 +142,8 @@ jobs:
       # and the VS Code task call it so they cannot disagree. It lints
       # examples/workflows/ and skips examples/dependabot.yml, which is
       # configuration rather than a workflow and which actionlint rejects
-      # outright. That file is YAML-parsed by the extractor step above instead,
-      # so it is not left with no syntax coverage at all.
+      # outright. That file is YAML-parsed by layer 1 above instead, so it is
+      # not left with no syntax coverage at all.
       #
       # Known limit: actionlint cannot resolve `uses: Apeify/ci/...@ref` against
       # a remote repository, so it checks the examples' schema and syntax but
@@ -364,15 +211,15 @@ jobs:
           shellcheck -x --source-path=SCRIPTDIR "${scripts[@]}"
 
       # Catches a class nothing else can see: actionlint cannot read composite
-      # actions at all, the extractor above only checks structure, and a
+      # actions at all, layer 1 above only checks structure, and a
       # description containing an expression is perfectly valid YAML. An action
       # shipped with an expression in an input description and every consumer
       # failed to LOAD it, before a step ran.
       #
-      # It needs js-yaml, which the extractor step installed - so it cannot run
-      # before that, and an earlier version of this comment claiming it beat the
-      # downloads was wrong in the same way the layer-1 comment above records
-      # being wrong.
+      # It needs js-yaml, which the Install js-yaml step installed - so it cannot
+      # run before that, and an earlier version of this comment claiming it beat
+      # the downloads was wrong in the same way the layer-1 comment at the top
+      # records being wrong.
       - name: Check action metadata for expressions
         shell: bash
         run: bash scripts/check-action-metadata.sh
@@ -383,8 +230,8 @@ jobs:
       # the failures they catch: a YAML slip reported as "no run: body found for
       # step X" would send a reader hunting in the wrong place.
       #
-      # The suite extracts the shell from the deploy action rather than
-      # restating it, so it cannot pass while the action is broken. See
+      # The suite runs the deploy action's own scripts rather than restating
+      # them, so it cannot pass while the action is broken. See
       # tests/run.sh.
       - name: Run the test suite
         shell: bash
