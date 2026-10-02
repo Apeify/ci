@@ -39,6 +39,10 @@ jobs:
     uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
     with:
       environment: dr
+      # If deploy.yml sets public-dir on ITS lint-and-test job, set the same
+      # value here. The deploy refuses minified assets made from a different
+      # directory, and this stub is the one nobody runs until the day it
+      # matters.
 
   deploy:
     needs: lint-and-test
@@ -68,6 +72,7 @@ jobs:
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
+          minified-assets: ${{ needs.lint-and-test.outputs.minified-assets }}
           web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
           site-url: ${{ vars.SITE_URL }}
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}

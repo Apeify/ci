@@ -13,6 +13,11 @@
 # everything after it. GitHub forbids `steps:` on a job that calls a workflow,
 # so this cannot be folded into the deploy job even by accident.
 #
+# It also minifies your CSS and JS, in a job of its own, for the same reason:
+# the minifier is third-party code. The deploy job runs none beyond GitHub's own
+# pinned actions. It receives only the minified files, as an artifact, and
+# refuses the deploy unless they match its own checkout file for file.
+#
 # deploy is an ACTION, so it runs inside a job you control - which means THIS
 # job can declare `environment:`, and the environment's secrets are read right
 # here rather than passed across a repository boundary. That is what makes the
@@ -75,14 +80,21 @@
 #   php-version      PHP version used for lint and tests.
 #   environment      Override which environment the deploy targets. Normally
 #                    derived from the branch; see deploy-dr.yml.
+#   public-dir       The directory whose assets/ subtree is minified. Set it
+#                    ONLY if you also set public-dir on the deploy step below,
+#                    and to the same value. A mismatch refuses the deploy.
 #
-# On the `deploy` job's `uses: Apeify/ci/actions/deploy` step. The first three
+# On the `deploy` job's `uses: Apeify/ci/actions/deploy` step. The first four
 # have no usable default and the deploy refuses without them:
 #
 #   environment      REQUIRED. Pass needs.lint-and-test.outputs.environment.
 #                    This drives the production refusals, so an empty value is
 #                    refused rather than defaulted to something safe-looking.
 #   attestation      REQUIRED. Pass needs.lint-and-test.outputs.attestation.
+#   minified-assets  REQUIRED. Pass needs.lint-and-test.outputs.minified-assets.
+#                    Names the artifact holding the minified CSS and JS. Its
+#                    value is `none` on a site with no assets, and that is
+#                    fine.
 #   web-root-dirs    REQUIRED. Pass ${{ vars.WEB_ROOT_DIRS }}. It is an input
 #                    rather than read from the environment because `vars` is
 #                    unreadable inside a composite action.
@@ -94,7 +106,8 @@
 #   site-url         Logging only. The clickable link on the deployment comes
 #                    from this job's `environment.url`.
 #   public-dir       Repo directory whose CONTENTS are deployed to each web
-#                    root. Conventionally `public`.
+#                    root. Conventionally `public`. If you set it, set the
+#                    lint-and-test job's public-dir to match.
 #   app-dir          Repo directory kept OUT of the web root. Conventionally
 #                    `app`.
 #   app-remote-dir   Name that directory takes ON THE SERVER. Set it only when
@@ -243,6 +256,7 @@ jobs:
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
+          minified-assets: ${{ needs.lint-and-test.outputs.minified-assets }}
           # `vars` is unreadable inside a composite action, so the web roots
           # are handed over explicitly.
           web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}

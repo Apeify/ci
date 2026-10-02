@@ -125,8 +125,11 @@ content - what the pipeline promises regardless of what the site happens to be:
 | A second deploy with no changes transfers almost nothing | Re-run the workflow, read the rsync `--stats` output | The strongest single signal that the mtime restore is working. A full re-transfer means it is not |
 | The itemized change list contains only what you expected | rsync `--itemize-changes` output in the log | Anything else moved is the finding |
 
-If the site has CSS or JS, also confirm the minified assets are present and
-non-empty; if it has none, that step has nothing to do and its log will say so.
+If the site has CSS or JS, also confirm the minified assets are present and non-empty on the
+server, that the `minify` job uploaded an artifact, and that the deploy's `Apply minified assets`
+step listed every file. If it has none, the handoff is `none` and both sides log that. Change
+both `uses:` lines to the branch, not one: the two halves share a contract (the
+`minified-assets` output), and a mismatched pair fails on it.
 
 **Put the stub back** when you are done - to the pin it had, or `@main` - and
 push again so the consumer is not left tracking your branch.
@@ -148,9 +151,20 @@ site. A separate job is a separate VM whose filesystem the deploy never sees.
 The lint job declares **no** `environment:`, so environment secrets are never in
 scope there at all.
 
-**The deploy job still runs third-party code** - `esbuild`, on the tree it is
-about to ship. It runs before the SSH key is written, so it cannot read the key,
-but the exact-version pin is the real mitigation, not the step ordering.
+**The deploy job runs no third-party code** beyond GitHub's own SHA-pinned actions
+(`actions/checkout`, `actions/download-artifact`). `esbuild` used to run there, ordered before the
+SSH key was written, and that ordering protected nothing: a job's secrets reach the runner when the
+job starts and sit in the runner process's memory, which any step can read with `sudo`. That is how
+the tj-actions/changed-files compromise harvested secrets in March 2025. Minifying now runs in a
+`minify` job inside `lint-and-test.yml` and crosses to the deploy as an artifact. The deploy fetches
+it by ID (any job can upload an artifact; only the minify job can set its own outputs), refuses any
+file its own checkout does not expect, refuses symlinks, and checks a digest that binds each
+minified file to the exact source it replaces. [README.md](README.md#minification) states what that
+leaves: a compromised minifier can still poison the files it minifies, and nothing can detect that
+short of not minifying.
+
+`minify` is its own job rather than a step of `lint-and-test`, because Composer runs third-party
+code too. Do not merge the two jobs to save a runner minute.
 
 **Test suites and Composer are detected, not configured.** A repo either has
 `tests/run.php`, or `vendor/bin/phpunit`, or `composer.json`, or none of them.

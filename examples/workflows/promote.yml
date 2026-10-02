@@ -62,5 +62,9 @@ jobs:
     permissions:
       contents: write # fast-forward and push `main`
       actions: write # dispatch the deploy workflow
+    # No `secrets:` line, deliberately. The only secret this needs is
+    # GITHUB_TOKEN, which GitHub grants every called workflow automatically.
+    # `secrets: inherit` would add nothing it uses, and would hand every
+    # repository and organization secret to shared code that has no use for
+    # them.
     uses: Apeify/ci/.github/workflows/promote.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
-    secrets: inherit

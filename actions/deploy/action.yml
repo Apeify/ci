@@ -40,6 +40,14 @@ inputs:
       exists and is listed in `needs`, which is also what forces it into a
       separate VM.
     required: true
+  minified-assets:
+    description: >-
+      `needs.lint-and-test.outputs.minified-assets`, passed through unchanged.
+      Names the artifact the minify job produced and the digest it must match.
+      Required, so that a stub which forgot it fails here rather than shipping
+      unminified source. Must come from the same lint-and-test job whose
+      `public-dir` names the same directory as this action's.
+    required: true
   web-root-dirs:
     description: >-
       Web-root directory NAMES, one per line, each relative to base-dir. Pass
@@ -266,6 +274,43 @@ runs:
           echo "the runner holding the deploy key."
           exit 1
         fi
+
+    # Parse the handoff from lint-and-test's minify job before anything else
+    # happens, so a stub that never passed it fails in the first seconds with
+    # a sentence naming the fix. Only the SHAPE is checked here; whether the
+    # artifact matches this checkout is "Apply minified assets" below.
+    #
+    # The download directory is cleared here too, so a leftover from an
+    # earlier step in the caller's job cannot pass for the artifact.
+    - name: Check the minified-assets handoff
+      id: assets-handoff
+      shell: bash
+      env:
+        MINIFIED_ASSETS: ${{ inputs.minified-assets }}
+        DOWNLOAD_DIR: ${{ runner.temp }}/apeify-ci-minified-assets
+      run: |
+        rm -rf "$DOWNLOAD_DIR"
+
+        if [ "$MINIFIED_ASSETS" = "none" ]; then
+          echo "artifact-id=" >> "$GITHUB_OUTPUT"
+          echo "lint-and-test found no CSS or JS to minify."
+          exit 0
+        fi
+
+        if [ -z "$MINIFIED_ASSETS" ]; then
+          echo "::error::The 'minified-assets' input is empty."
+          echo "Pass 'needs.lint-and-test.outputs.minified-assets'. If it is already passed, the"
+          echo "lint-and-test pin predates that output: pin both halves to the same release."
+          exit 1
+        fi
+
+        if ! [[ "$MINIFIED_ASSETS" =~ ^[0-9]+:[0-9a-f]{64}$ ]]; then
+          echo "::error::The 'minified-assets' input is not a value lint-and-test produces."
+          echo "Pass 'needs.lint-and-test.outputs.minified-assets' unchanged, not a literal."
+          exit 1
+        fi
+
+        echo "artifact-id=${MINIFIED_ASSETS%%:*}" >> "$GITHUB_OUTPUT"
 
     # NO CHECKOUT HERE. The caller does it, and this step only checks the
     # result.
@@ -969,65 +1014,166 @@ runs:
         tracked=$(git ls-files | wc -l)
         echo "restored mtimes on $tracked tracked files: $touched from the history walk, $repaired via per-file fallback"
 
-    # Minify the CSS and JS that ship, so the source can stay heavily
-    # commented for the next person without the comments costing visitors
-    # anything. Measured on these sites: roughly half off each file even AFTER
-    # gzip, and the stylesheet is render-blocking.
+    # Bring in the CSS and JS that lint-and-test's minify job produced.
     #
-    # Edits the checked-out workspace only - the repo keeps the readable
-    # source; nothing is committed back.
+    # NO THIRD-PARTY CODE RUNS IN THIS JOB TO DO IT. Minifying used to happen
+    # here, with esbuild ordered before the SSH key was written, and that
+    # ordering protected nothing: the runner holds every secret this job was
+    # given in memory from the first step, and any step can `sudo` to read it.
+    # See "WHY MINIFICATION LIVES HERE TOO" in lint-and-test.yml for the rest.
+    # The only code here this repo did not write is GitHub's own artifact
+    # client, pinned by SHA - the same trust already extended to
+    # actions/checkout.
     #
-    # esbuild rather than a hand-rolled regex pass: these stylesheets use very
-    # new CSS (@starting-style, ::details-content, interpolate-size,
-    # transition-behavior, `scripting` queries) and a naive minifier would
-    # quietly drop what it does not understand, breaking animations with no
-    # error. Pinned to an exact version, and run BEFORE the SSH key exists so
-    # it can never read the key.
+    # The artifact is untrusted input, and is checked as such before a single
+    # byte of it reaches the tree that gets rsynced:
     #
-    # Be clear-eyed about what that ordering does and does not buy: esbuild is
-    # third-party code running in the deploy job on the very tree that is about
-    # to be rsynced. It cannot read a key that has not been written yet, but it
-    # could in principle tamper with the output. The exact-version pin is the
-    # real mitigation, not the step ordering.
+    #   - It is fetched by the ID the minify job published, never by name.
+    #     Any job in the run can upload an artifact; only that job can set its
+    #     own outputs.
+    #   - Its file list must EQUAL what this checkout's own discovery finds.
+    #     An extra file is refused, not ignored - that is the one thing that
+    #     stops a compromised minifier planting a .php file in a web root. A
+    #     missing file is refused too, since it would ship unminified.
+    #   - Every entry must be a regular file. A symlink could point anywhere on
+    #     this runner, ~/.ssh included, and the copy would follow it.
+    #   - The digest covers each file's SOURCE hash as well as its minified
+    #     hash, recomputed here from this checkout. A minified file is accepted
+    #     only as the replacement for the exact source it was made from - which
+    #     also catches a lint-and-test `public-dir` that names a different
+    #     directory from this action's.
+    #   - The JS-validity and collapsed-file checks run again here, on what was
+    #     received, rather than trusting the other job's report of them.
     #
-    # DISCOVERS its targets rather than naming them. Naming files means that
-    # the day someone adds a second stylesheet or a page-specific script, it
-    # ships unminified with every comment intact - silently, and forever.
-    # Discovery also means this skips cleanly when there are no assets at all.
+    # Assets the caller built in THIS job, after checkout and before this
+    # action, are not covered: the minify job never saw them, so they show up
+    # as missing from the artifact and the deploy is refused. That is loud on
+    # purpose - shipping them unminified, or minifying them here, would each
+    # quietly undo something.
     #
-    # The size guard is RELATIVE (had content -> has none) rather than an
-    # absolute byte floor. With discovery a legitimately tiny new script would
-    # trip a fixed floor, and padding a file out to clear one would defeat the
-    # very check that is supposed to catch a broken minifier.
-    #
-    # If a pre-minified vendor file ever lands under public/assets, exclude it
-    # here rather than letting esbuild run over it twice.
-    - name: Minify CSS and JS
-      env:
-        PUBLIC_DIR: ${{ inputs.public-dir }}
+    # Written into the workspace in place of the source - the repo keeps the
+    # readable source; nothing is committed back. The copies get a fresh mtime,
+    # exactly as the in-place minify did, so they re-sync each deploy.
+    - name: Download minified assets
+      if: steps.assets-handoff.outputs.artifact-id != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        artifact-ids: ${{ steps.assets-handoff.outputs.artifact-id }}
+        path: ${{ runner.temp }}/apeify-ci-minified-assets
+
+    # Every value comes from env: and the step contains no expressions, so
+    # tests/minified-assets.test.sh drives it as written. The record format
+    # must match the minify job's byte for byte; that test runs both and is
+    # what notices if they drift.
+    - name: Apply minified assets
       shell: bash
+      env:
+        MINIFIED_ASSETS: ${{ inputs.minified-assets }}
+        PUBLIC_DIR: ${{ inputs.public-dir }}
+        DOWNLOAD_DIR: ${{ runner.temp }}/apeify-ci-minified-assets
       run: |
-        # Install esbuild once; every later npx call reuses the cached binary.
-        npx --yes esbuild@0.25.10 --version
+        expected=()
+        if [ -d "$PUBLIC_DIR/assets" ]; then
+          mapfile -d '' -t expected < <(
+            cd "$PUBLIC_DIR" &&
+              find assets -type f \( -name '*.css' -o -name '*.js' \) -print0 | LC_ALL=C sort -z
+          )
+        fi
 
-        mapfile -t targets < <(
-          find "$PUBLIC_DIR/assets" -type f \( -name '*.css' -o -name '*.js' \) 2>/dev/null | sort
-        )
-
-        if [ ${#targets[@]} -eq 0 ]; then
-          echo "::warning::No CSS or JS found under ${PUBLIC_DIR}/assets - nothing to minify."
+        if [ "$MINIFIED_ASSETS" = "none" ]; then
+          if [ ${#expected[@]} -ne 0 ]; then
+            echo "::error::lint-and-test minified nothing, but ${PUBLIC_DIR}/assets here holds ${#expected[@]} CSS/JS file(s):"
+            printf '  %s\n' "${expected[@]}"
+            echo "Either lint-and-test's public-dir names a different directory from this action's,"
+            echo "or those files were created in this job after checkout. Refusing to ship them unminified."
+            exit 1
+          fi
+          echo "No CSS or JS to apply."
           exit 0
         fi
 
-        for f in "${targets[@]}"; do
+        if [ ${#expected[@]} -eq 0 ]; then
+          echo "::error::lint-and-test minified CSS/JS, but ${PUBLIC_DIR}/assets here holds none."
+          echo "lint-and-test's public-dir must name the same directory as this action's."
+          exit 1
+        fi
+
+        if [ ! -d "$DOWNLOAD_DIR" ] || [ -L "$DOWNLOAD_DIR" ]; then
+          echo "::error::The minified-assets artifact was not downloaded to ${DOWNLOAD_DIR}."
+          exit 1
+        fi
+
+        # Everything that is not a directory must be a regular file...
+        entries=()
+        mapfile -d '' -t entries < <(
+          cd "$DOWNLOAD_DIR" && find . -mindepth 1 ! -type d -print0 | LC_ALL=C sort -z
+        )
+        bad=0
+        for entry in "${entries[@]}"; do
+          if [ -L "${DOWNLOAD_DIR}/${entry}" ] || [ ! -f "${DOWNLOAD_DIR}/${entry}" ]; then
+            echo "::error::Artifact entry '${entry#./}' is not a regular file."
+            bad=1
+          fi
+        done
+        [ "$bad" -eq 0 ] || exit 1
+
+        # ...and the set of them must equal what discovery found here.
+        received=()
+        for entry in "${entries[@]}"; do
+          received+=("${entry#./}")
+        done
+        if [ "$(printf '%s\0' "${received[@]}" | LC_ALL=C sort -z | sha256sum)" != \
+             "$(printf '%s\0' "${expected[@]}" | sha256sum)" ]; then
+          echo "::error::The minified-assets artifact does not hold exactly the CSS/JS this checkout has."
+          echo "Expected (from ${PUBLIC_DIR}/assets here):"
+          printf '  %s\n' "${expected[@]}"
+          echo "Received:"
+          printf '  %s\n' "${received[@]}"
+          echo "Refusing to deploy. An extra file is never copied into the tree."
+          exit 1
+        fi
+
+        records=$(mktemp)
+        for rel in "${expected[@]}"; do
+          src_hash=$(sha256sum < "${PUBLIC_DIR}/${rel}" | cut -d' ' -f1)
+          min_hash=$(sha256sum < "${DOWNLOAD_DIR}/${rel}" | cut -d' ' -f1)
+          printf '%s\0%s\0%s\0' "$rel" "$src_hash" "$min_hash" >> "$records"
+        done
+        digest=$(sha256sum < "$records" | cut -d' ' -f1)
+        rm -f "$records"
+
+        if [ "$digest" != "${MINIFIED_ASSETS#*:}" ]; then
+          echo "::error::The minified assets do not match the digest the minify job published."
+          echo "Either the artifact changed after it was produced, or a file here differs from the"
+          echo "source that job minified. Refusing to deploy."
+          exit 1
+        fi
+
+        # Every GitHub-hosted runner has Node. Checked once, so a self-hosted
+        # runner without it is told so, rather than told every script it
+        # ships is invalid JavaScript.
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::node is not installed on this runner; it is needed to check the minified JavaScript."
+          exit 1
+        fi
+
+        # Checked IN PLACE, after the copy, not in the download directory:
+        # `node --check` decides between ES module and CommonJS from the
+        # nearest package.json, so the same file can pass in the repo and fail
+        # in a temp directory, or the reverse. A refusal here fails the action
+        # before any sync step, so the copies already made never ship.
+        for rel in "${expected[@]}"; do
+          f="${PUBLIC_DIR}/${rel}"
           before=$(wc -c < "$f")
-          npx esbuild@0.25.10 "$f" --minify --allow-overwrite --outfile="$f"
+          cp -- "${DOWNLOAD_DIR}/${rel}" "$f"
           after=$(wc -c < "$f")
 
-          # Still valid JS after minifying? A minifier that silently emitted
-          # garbage would be worse than one that failed outright.
-          case "$f" in
-            *.js) node --check "$f" ;;
+          case "$rel" in
+            *.js)
+              if ! node --check "$f"; then
+                echo "::error::$f: the minified file is not valid JavaScript - refusing to deploy."
+                exit 1
+              fi ;;
           esac
 
           if [ "$before" -gt 0 ] && [ "$after" -eq 0 ]; then

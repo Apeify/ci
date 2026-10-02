@@ -68,12 +68,13 @@ bash tests/run.sh                                   # behavior of the shell in t
 ```
 
 **The tests run the shipping code, not a copy of it.** [tests/lib/harness.sh](tests/lib/harness.sh)
-extracts a step's `run:` body - or one function - out of `actions/deploy/action.yml` and
-executes it, because a transcription under `tests/` would keep passing while the action was
-broken. Two consequences worth knowing before editing either side: the preflight step is testable
-only because it takes every value from `env:` and contains no `${{ }}` of its own, and a test named
-`REGRESSION` records a bug
-that actually shipped. They need only bash, awk and git.
+extracts a step's `run:` body - or one function - out of `actions/deploy/action.yml` (or
+`lint-and-test.yml`, for the minify job) and executes it, because a transcription under `tests/`
+would keep passing while the action was broken. Two consequences worth knowing before editing
+either side: the preflight and minified-assets steps are testable only because they take every
+value from `env:` and contain no `${{ }}` of their own, and a test named `REGRESSION` records a
+bug that actually shipped. They need only bash, awk and git; the JS-validity cases also use Node
+when it is installed and say so when it is not.
 
 **Local checks cannot test a deploy.** There is no host and no credentials here, so nothing
 exercises rsync, ssh, or the server-side layout. The real integration test is to point one
@@ -85,7 +86,8 @@ process in full.
 
 ```
 .github/workflows/
-  lint-and-test.yml  Reusable. Lints, tests, and resolves the target environment.
+  lint-and-test.yml  Reusable. Lints, tests, resolves the target environment, and minifies
+                     CSS/JS in a separate job, handing the result to the deploy.
   promote.yml        Reusable. The publish button: fast-forward main, dispatch the deploy.
   validate.yml       The ONLY workflow with triggers. Lints the other two.
 actions/
