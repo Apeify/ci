@@ -42,11 +42,11 @@ inputs:
     required: true
   minified-assets:
     description: >-
-      `needs.lint-and-test.outputs.minified-assets`, passed through unchanged.
-      Names the artifact the minify job produced and the digest it must match.
+      `needs.minify.outputs.minified-assets`, passed through unchanged. Names
+      the artifact the minify workflow produced and the digest it must match.
       Required, so that a stub which forgot it fails here rather than shipping
-      unminified source. Must come from the same lint-and-test job whose
-      `public-dir` names the same directory as this action's.
+      unminified source. The minify job's `public-dir` must name the same
+      directory as this action's.
     required: true
   web-root-dirs:
     description: >-
@@ -275,7 +275,7 @@ runs:
           exit 1
         fi
 
-    # Parse the handoff from lint-and-test's minify job before anything else
+    # Parse the handoff from the minify workflow before anything else
     # happens, so a stub that never passed it fails in the first seconds with
     # a sentence naming the fix. Only the SHAPE is checked here; whether the
     # artifact matches this checkout is "Apply minified assets" below.
@@ -293,20 +293,20 @@ runs:
 
         if [ "$MINIFIED_ASSETS" = "none" ]; then
           echo "artifact-id=" >> "$GITHUB_OUTPUT"
-          echo "lint-and-test found no CSS or JS to minify."
+          echo "The minify job found no CSS or JS to minify."
           exit 0
         fi
 
         if [ -z "$MINIFIED_ASSETS" ]; then
           echo "::error::The 'minified-assets' input is empty."
-          echo "Pass 'needs.lint-and-test.outputs.minified-assets'. If it is already passed, the"
-          echo "lint-and-test pin predates that output: pin both halves to the same release."
+          echo "Add a minify job calling Apeify/ci's minify.yml, and pass"
+          echo "'needs.minify.outputs.minified-assets'. See the README's Minification section."
           exit 1
         fi
 
         if ! [[ "$MINIFIED_ASSETS" =~ ^[0-9]+:[0-9a-f]{64}$ ]]; then
-          echo "::error::The 'minified-assets' input is not a value lint-and-test produces."
-          echo "Pass 'needs.lint-and-test.outputs.minified-assets' unchanged, not a literal."
+          echo "::error::The 'minified-assets' input is not a value the minify workflow produces."
+          echo "Pass 'needs.minify.outputs.minified-assets' unchanged, not a literal."
           exit 1
         fi
 
@@ -1014,13 +1014,13 @@ runs:
         tracked=$(git ls-files | wc -l)
         echo "restored mtimes on $tracked tracked files: $touched from the history walk, $repaired via per-file fallback"
 
-    # Bring in the CSS and JS that lint-and-test's minify job produced.
+    # Bring in the CSS and JS that the minify workflow produced.
     #
     # NO THIRD-PARTY CODE RUNS IN THIS JOB TO DO IT. Minifying used to happen
     # here, with esbuild ordered before the SSH key was written, and that
     # ordering protected nothing: the runner holds every secret this job was
     # given in memory from the first step, and any step can `sudo` to read it.
-    # See "WHY MINIFICATION LIVES HERE TOO" in lint-and-test.yml for the rest.
+    # See the header of .github/workflows/minify.yml for the rest.
     # The only code here this repo did not write is GitHub's own artifact
     # client, pinned by SHA - the same trust already extended to
     # actions/checkout.
@@ -1040,7 +1040,7 @@ runs:
     #   - The digest covers each file's SOURCE hash as well as its minified
     #     hash, recomputed here from this checkout. A minified file is accepted
     #     only as the replacement for the exact source it was made from - which
-    #     also catches a lint-and-test `public-dir` that names a different
+    #     also catches a minify job `public-dir` that names a different
     #     directory from this action's.
     #   - The JS-validity and collapsed-file checks run again here, on what was
     #     received, rather than trusting the other job's report of them.
@@ -1082,9 +1082,9 @@ runs:
 
         if [ "$MINIFIED_ASSETS" = "none" ]; then
           if [ ${#expected[@]} -ne 0 ]; then
-            echo "::error::lint-and-test minified nothing, but ${PUBLIC_DIR}/assets here holds ${#expected[@]} CSS/JS file(s):"
+            echo "::error::The minify job minified nothing, but ${PUBLIC_DIR}/assets here holds ${#expected[@]} CSS/JS file(s):"
             printf '  %s\n' "${expected[@]}"
-            echo "Either lint-and-test's public-dir names a different directory from this action's,"
+            echo "Either the minify job's public-dir names a different directory from this action's,"
             echo "or those files were created in this job after checkout. Refusing to ship them unminified."
             exit 1
           fi
@@ -1093,8 +1093,8 @@ runs:
         fi
 
         if [ ${#expected[@]} -eq 0 ]; then
-          echo "::error::lint-and-test minified CSS/JS, but ${PUBLIC_DIR}/assets here holds none."
-          echo "lint-and-test's public-dir must name the same directory as this action's."
+          echo "::error::The minify job minified CSS/JS, but ${PUBLIC_DIR}/assets here holds none."
+          echo "The minify job's public-dir must name the same directory as this action's."
           exit 1
         fi
 

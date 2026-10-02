@@ -69,12 +69,12 @@ bash tests/run.sh                                   # behavior of the shell in t
 
 **The tests run the shipping code, not a copy of it.** [tests/lib/harness.sh](tests/lib/harness.sh)
 extracts a step's `run:` body - or one function - out of `actions/deploy/action.yml` (or
-`lint-and-test.yml`, for the minify job) and executes it, because a transcription under `tests/`
-would keep passing while the action was broken. Two consequences worth knowing before editing
-either side: the preflight and minified-assets steps are testable only because they take every
-value from `env:` and contain no `${{ }}` of their own, and a test named `REGRESSION` records a
-bug that actually shipped. They need only bash, awk and git; the JS-validity cases also use Node
-when it is installed and say so when it is not.
+`minify.yml`) and executes it, because a transcription under `tests/` would keep passing while the
+action was broken. Two consequences worth knowing before editing either side: the preflight and
+minified-assets steps are testable only because they take every value from `env:` and contain no
+`${{ }}` of their own, and a test named `REGRESSION` records a bug that actually shipped. They
+need only bash, awk and git; the JS-validity cases also use Node when it is installed and say so
+when it is not.
 
 **Local checks cannot test a deploy.** There is no host and no credentials here, so nothing
 exercises rsync, ssh, or the server-side layout. The real integration test is to point one
@@ -86,10 +86,10 @@ process in full.
 
 ```
 .github/workflows/
-  lint-and-test.yml  Reusable. Lints, tests, resolves the target environment, and minifies
-                     CSS/JS in a separate job, handing the result to the deploy.
+  lint-and-test.yml  Reusable. Lints, tests, and resolves the target environment.
+  minify.yml         Reusable. Minifies CSS/JS away from the deploy key, as an artifact.
   promote.yml        Reusable. The publish button: fast-forward main, dispatch the deploy.
-  validate.yml       The ONLY workflow with triggers. Lints the other two.
+  validate.yml       The ONLY workflow with triggers. Lints the others.
 actions/
   deploy/         Composite action. The rsync half, run inside the CONSUMER's job.
 examples/         Copyable artifacts, laid out to mirror where each goes in a
@@ -110,8 +110,9 @@ Two properties are load-bearing and easy to break by accident:
 - **The split between a workflow and an action is not stylistic.** The deploy is an action because
   only a normal job can declare `environment:`, and the credentials are environment secrets - as a
   reusable workflow it would need `secrets: inherit`, which carries nothing across an owner
-  boundary. `lint-and-test` stays a workflow because a job calling one cannot also declare
-  `steps:`, which is what stops third-party test code sharing a runner with the deploy key.
+  boundary. `lint-and-test` and `minify` stay workflows because a job calling one cannot also
+  declare `steps:`, which is what stops third-party code (test dependencies, the minifier) sharing
+  a runner with the deploy key.
   Converting either to match the other silently destroys one of those two properties.
 - **Consumers omit `main` from their push trigger.** That absence substitutes for the
   required-reviewer rule these repos cannot have: pushing to `main` deploys nothing. It is not

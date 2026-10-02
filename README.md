@@ -24,7 +24,8 @@ The consuming project ...
 
 | Piece | Kind | What it does |
 |---|---|---|
-| [`lint-and-test.yml`](.github/workflows/lint-and-test.yml) | reusable workflow | Syntax-checks PHP, installs dev dependencies, runs whichever test suite the repo has, resolves which environment the deploy targets, and - in a job of its own - minifies the CSS and JS that ship |
+| [`lint-and-test.yml`](.github/workflows/lint-and-test.yml) | reusable workflow | Syntax-checks PHP, installs dev dependencies, runs whichever test suite the repo has, and resolves which environment the deploy targets |
+| [`minify.yml`](.github/workflows/minify.yml) | reusable workflow | Minifies the CSS and JS that ship, away from the deploy key, and hands the result to the deploy as an artifact |
 | [`actions/deploy`](actions/deploy/) | composite action | Validates the target layout, restores mtimes, applies the minified assets after checking them against the checkout, and rsyncs the site to one or more web roots over SSH |
 | [`promote.yml`](.github/workflows/promote.yml) | reusable workflow | The publish button: fast-forwards `main` to `staging`, then starts the production deploy |
 
@@ -53,16 +54,20 @@ reusable workflow, so a consumer cannot fold the two into one job even by
 accident. That refusal is the isolation guarantee, and it is why converting this
 half to an action "for symmetry" would quietly destroy it.
 
+**`minify.yml` is a workflow for the same reason.** The minifier is third-party code fetched from
+npm, so it gets its own VM too, and the deploy receives only the files it produced - checked
+against its own checkout before any of them ship. See [Minification](#minification).
+
 So: **anything needing an environment must be an action; anything needing its own
 VM must be a workflow.** This pipeline needs both, so it ships both.
 
-Neither workflow has a trigger of its own. `workflow_call` is their only entry
+None of these workflows has a trigger of its own. `workflow_call` is their only entry
 point, so pushing to this repository never runs them and no "Run workflow" button
 appears here. Every real trigger lives in the consuming repo, which is where branch
 policy belongs.
 
-A third workflow, [`validate.yml`](.github/workflows/validate.yml), *does* have
-triggers - it lints the other two. See
+One more workflow, [`validate.yml`](.github/workflows/validate.yml), *does* have
+triggers - it lints the others. See
 [Validating changes here](MAINTAINING.md#validating-changes-here).
 
 ### Where to look
@@ -126,7 +131,7 @@ is not a workflow and does not live with them.
 [`examples/workflows/`](examples/workflows/).** That directory mirrors where the
 files go: everything in it belongs in your site repo's `.github/workflows/`, so
 copy `deploy.yml` and `promote.yml` across keeping the same filenames. Each
-stub is two jobs - see [Why one of each](#why-one-of-each) for what the split
+stub is three jobs - see [Why one of each](#why-one-of-each) for what the split
 buys you.
 [`examples/dependabot.yml`](examples/dependabot.yml) sits one level up because it
 belongs one level up, at `.github/dependabot.yml`. The blocks below are the same
@@ -144,10 +149,10 @@ disagree, so what you see here is always what is in `examples/`.
 # https://github.com/Apeify/ci#readme for the full contract and the reasoning.
 #
 # =========================================================================
-# WHY TWO JOBS
+# WHY THREE JOBS
 # =========================================================================
 #
-# Not stylistic. The two halves use different mechanisms on purpose.
+# Not stylistic. They use different mechanisms on purpose.
 #
 # lint-and-test is a reusable WORKFLOW, so it is always its own job on its own
 # VM. Tests run third-party code - a Composer install executes arbitrary package
@@ -155,9 +160,9 @@ disagree, so what you see here is always what is in `examples/`.
 # everything after it. GitHub forbids `steps:` on a job that calls a workflow,
 # so this cannot be folded into the deploy job even by accident.
 #
-# It also minifies your CSS and JS, in a job of its own, for the same reason:
-# the minifier is third-party code. The deploy job runs none beyond GitHub's own
-# pinned actions. It receives only the minified files, as an artifact, and
+# minify is a reusable WORKFLOW for the same reason: the minifier is
+# third-party code, fetched from npm. The deploy job runs none beyond GitHub's
+# own pinned actions. It receives only the minified files, as an artifact, and
 # refuses the deploy unless they match its own checkout file for file.
 #
 # deploy is an ACTION, so it runs inside a job you control - which means THIS
@@ -213,8 +218,8 @@ disagree, so what you see here is always what is in `examples/`.
 # the shared pipeline and deliberately not restated here - a copy in this file
 # would go stale the day one of them changes. See the README's Inputs tables.
 #
-# NOTE THERE ARE TWO `with:` BLOCKS, one per job, and they take different
-# inputs. Putting one under the wrong job fails the run before it starts, with
+# NOTE EACH JOB HAS ITS OWN `with:` BLOCK, and they take different inputs.
+# Putting one under the wrong job fails the run before it starts, with
 # "Invalid input, ... is not defined in the referenced workflow".
 #
 # On the `lint-and-test` job:
@@ -222,6 +227,9 @@ disagree, so what you see here is always what is in `examples/`.
 #   php-version      PHP version used for lint and tests.
 #   environment      Override which environment the deploy targets. Normally
 #                    derived from the branch; see deploy-dr.yml.
+#
+# On the `minify` job:
+#
 #   public-dir       The directory whose assets/ subtree is minified. Set it
 #                    ONLY if you also set public-dir on the deploy step below,
 #                    and to the same value. A mismatch refuses the deploy.
@@ -233,7 +241,7 @@ disagree, so what you see here is always what is in `examples/`.
 #                    This drives the production refusals, so an empty value is
 #                    refused rather than defaulted to something safe-looking.
 #   attestation      REQUIRED. Pass needs.lint-and-test.outputs.attestation.
-#   minified-assets  REQUIRED. Pass needs.lint-and-test.outputs.minified-assets.
+#   minified-assets  REQUIRED. Pass needs.minify.outputs.minified-assets.
 #                    Names the artifact holding the minified CSS and JS. Its
 #                    value is `none` on a site with no assets, and that is
 #                    fine.
@@ -249,7 +257,7 @@ disagree, so what you see here is always what is in `examples/`.
 #                    from this job's `environment.url`.
 #   public-dir       Repo directory whose CONTENTS are deployed to each web
 #                    root. Conventionally `public`. If you set it, set the
-#                    lint-and-test job's public-dir to match.
+#                    minify job's public-dir to match.
 #   app-dir          Repo directory kept OUT of the web root. Conventionally
 #                    `app`.
 #   app-remote-dir   Name that directory takes ON THE SERVER. Set it only when
@@ -373,8 +381,11 @@ jobs:
   lint-and-test:
     uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 
+  minify:
+    uses: Apeify/ci/.github/workflows/minify.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
+
   deploy:
-    needs: lint-and-test
+    needs: [lint-and-test, minify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -398,7 +409,7 @@ jobs:
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
-          minified-assets: ${{ needs.lint-and-test.outputs.minified-assets }}
+          minified-assets: ${{ needs.minify.outputs.minified-assets }}
           # `vars` is unreadable inside a composite action, so the web roots
           # are handed over explicitly.
           web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
@@ -579,13 +590,15 @@ jobs:
     uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
     with:
       environment: dr
-      # If deploy.yml sets public-dir on ITS lint-and-test job, set the same
-      # value here. The deploy refuses minified assets made from a different
-      # directory, and this stub is the one nobody runs until the day it
-      # matters.
+
+  minify:
+    uses: Apeify/ci/.github/workflows/minify.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
+    # If deploy.yml sets public-dir on ITS minify job, set the same value here.
+    # The deploy refuses minified assets made from a different directory, and
+    # this stub is the one nobody runs until the day it matters.
 
   deploy:
-    needs: lint-and-test
+    needs: [lint-and-test, minify]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -612,7 +625,7 @@ jobs:
         with:
           environment: ${{ needs.lint-and-test.outputs.environment }}
           attestation: ${{ needs.lint-and-test.outputs.attestation }}
-          minified-assets: ${{ needs.lint-and-test.outputs.minified-assets }}
+          minified-assets: ${{ needs.minify.outputs.minified-assets }}
           web-root-dirs: ${{ vars.WEB_ROOT_DIRS }}
           site-url: ${{ vars.SITE_URL }}
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -662,7 +675,7 @@ no configuration is shared between site repos.
 
 ### Inputs
 
-The stub has **two** `with:` blocks, one per job, and they take different inputs.
+Each job in the stub has its **own** `with:` block, and they take different inputs.
 Putting one under the wrong job fails the run before it starts with "Invalid
 input, ... is not defined in the referenced workflow".
 
@@ -672,6 +685,11 @@ input, ... is not defined in the referenced workflow".
 |---|---|---|
 | `php-version` | `8.3` | PHP version for lint and tests |
 | `environment` | *(derived from the ref)* | Override which environment the deploy targets. Set it to reach a third target such as Disaster Recovery |
+
+**`minify.yml`** - on the `minify` job:
+
+| Input | Default | Meaning |
+|---|---|---|
 | `public-dir` | `public` | Directory whose `assets/` subtree is minified. Must match the deploy step's `public-dir`; a mismatch refuses the deploy |
 
 **`actions/deploy`** - on the step inside the `deploy` job. The first five rows have no usable
@@ -681,7 +699,7 @@ default and the deploy refuses without them:
 |---|---|---|
 | `environment` | **required** | Pass `needs.lint-and-test.outputs.environment`. Drives the production refusals, so an empty value is refused rather than defaulted |
 | `attestation` | **required** | Pass `needs.lint-and-test.outputs.attestation` |
-| `minified-assets` | **required** | Pass `needs.lint-and-test.outputs.minified-assets`. Names the artifact holding the minified CSS and JS; see [Minification](#minification) |
+| `minified-assets` | **required** | Pass `needs.minify.outputs.minified-assets`. Names the artifact holding the minified CSS and JS; see [Minification](#minification) |
 | `web-root-dirs` | **required** | Pass `${{ vars.WEB_ROOT_DIRS }}`. An input because `vars` is unreadable inside a composite action |
 | `ssh-key`, `host`, `user`, `base-dir` | *(empty)* | The credentials, from that environment's secrets. Reported together by the preflight when missing |
 | `port`, `host-key` | *(empty)* | Optional; see [Host key pinning](#host-key-pinning) |
@@ -965,11 +983,11 @@ pinned `esbuild` before it ships, so the source can stay heavily commented. Noth
 back; the repo keeps the readable source.
 
 **The minifier never runs in the job that holds your deploy key.** It is third-party code, fetched
-from npm, so it runs in a `minify` job inside `lint-and-test.yml`: its own VM, no environment, no
-secrets. It hands the deploy an artifact of minified files plus the `minified-assets` output, which
-names that artifact and carries a digest of every file's source and minified hashes. The deploy job
-then runs nothing third-party beyond GitHub's own SHA-pinned `actions/checkout` and
-`actions/download-artifact`.
+from npm, so it runs in its own workflow, `minify.yml`, called as a `minify` job: its own VM, no
+environment, no secrets. It hands the deploy an artifact of minified files plus the
+`minified-assets` output, which names that artifact and carries a digest of every file's source
+and minified hashes. The deploy job then runs nothing third-party beyond GitHub's own SHA-pinned
+`actions/checkout` and `actions/download-artifact`.
 
 Ordering the minifier before the key is written, in the same job, would not be a substitute. A
 job's secrets are delivered to the runner when the job starts, and any step can read the runner's
@@ -996,8 +1014,8 @@ no longer do is read the deploy key or put any other file on the server.
 
 Three consequences for a site's setup:
 
-- **`public-dir` is stated twice** if you change it from the default - once on the `lint-and-test`
-  job and once on the deploy step, in every deploy stub (including `deploy-dr.yml`). A mismatch is
+- **`public-dir` is stated twice** if you change it from the default - once on the `minify` job
+  and once on the deploy step, in every deploy stub (including `deploy-dr.yml`). A mismatch is
   refused, not shipped.
 - **CSS or JS generated inside the deploy job** - by a step between checkout and the deploy action -
   is not supported. The minify job never saw it, so the deploy refuses it as missing from the
@@ -1198,6 +1216,7 @@ way, so a fresh copy starts pinned rather than tracking a branch:
 
 ```yaml
 uses: Apeify/ci/.github/workflows/lint-and-test.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
+uses: Apeify/ci/.github/workflows/minify.yml@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 uses: Apeify/ci/actions/deploy@075bf4b34f1200caef06a26aee50de5bb8e3fc76 # v2.1.0
 ```
 

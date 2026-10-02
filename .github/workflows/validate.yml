@@ -3,10 +3,10 @@ name: Validate workflows
 # Lints the reusable workflows in this repository before they can reach a
 # consuming site.
 #
-# This is the one workflow here that DOES have real triggers. lint-and-test.yml
-# and promote.yml are `workflow_call`-only and cannot run on their own, and
-# actions/deploy is not a workflow at all; this one is the reason pushing here
-# does anything at all.
+# This is the one workflow here that DOES have real triggers. lint-and-test.yml,
+# minify.yml and promote.yml are `workflow_call`-only and cannot run on their
+# own, and actions/deploy is not a workflow at all; this one is the reason
+# pushing here does anything at all.
 #
 # WHY IT EXISTS
 #
@@ -99,7 +99,7 @@ jobs:
       # Parse every workflow, and write each `run:` block out as its own script
       # for the two checks that follow.
       #
-      # js-yaml pinned to an exact version, the same way lint-and-test.yml pins
+      # js-yaml pinned to an exact version, the same way minify.yml pins
       # esbuild. Node is preinstalled on the runner; a YAML parser is not.
       #
       # GitHub expressions are substituted out before the scripts are written.

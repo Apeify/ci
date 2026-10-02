@@ -60,7 +60,7 @@ try. The tags exist for the shared action code, which is what consumers actually
 resolve; the stub is a starting point, and a starting point one version back
 still deploys correctly and gets a Dependabot PR on day one.
 
-So re-pin the five `uses: Apeify/ci` lines across the three files whenever the
+So re-pin the seven `uses: Apeify/ci` lines across the three files whenever the
 repo is being touched anyway - typically alongside the next release - and let it
 drift in between. A stub on `@main` teaches the wrong thing permanently; a stub
 a version or two back costs nothing.
@@ -101,6 +101,7 @@ ref to your branch and push that repo's `staging`:
 
 ```yaml
 uses: Apeify/ci/.github/workflows/lint-and-test.yml@my-branch
+uses: Apeify/ci/.github/workflows/minify.yml@my-branch
 # ...and, in the same stub:
 uses: Apeify/ci/actions/deploy@my-branch
 ```
@@ -115,7 +116,7 @@ content - what the pipeline promises regardless of what the site happens to be:
 
 | Check | How | Why it is here |
 |---|---|---|
-| Both jobs went green | Actions run | The lint/test job and the deploy job are separate; a green deploy with a skipped test job is not a pass |
+| All three jobs went green | Actions run | The lint/test, minify and deploy jobs are separate; a green deploy with a skipped test job is not a pass |
 | The preflight printed the layout you expected | `Preflight - check configuration` step log | It echoes the normalized paths. If they differ from what you configured, normalization changed |
 | The site still serves | `curl -sI https://<staging-domain>` | Confirms the web root still holds a servable tree, whatever that tree is |
 | Server-managed state survived | `ssh` in and check a path from that environment's `app-excludes` / `public-excludes` | `--delete` runs against a tree the repo does not contain these files in. This is the check most likely to catch a real regression |
@@ -128,7 +129,7 @@ content - what the pipeline promises regardless of what the site happens to be:
 If the site has CSS or JS, also confirm the minified assets are present and non-empty on the
 server, that the `minify` job uploaded an artifact, and that the deploy's `Apply minified assets`
 step listed every file. If it has none, the handoff is `none` and both sides log that. Change
-both `uses:` lines to the branch, not one: the two halves share a contract (the
+every `uses:` line to the branch, not some: `minify.yml` and the deploy share a contract (the
 `minified-assets` output), and a mismatched pair fails on it.
 
 **Put the stub back** when you are done - to the pin it had, or `@main` - and
@@ -155,16 +156,19 @@ scope there at all.
 (`actions/checkout`, `actions/download-artifact`). `esbuild` used to run there, ordered before the
 SSH key was written, and that ordering protected nothing: a job's secrets reach the runner when the
 job starts and sit in the runner process's memory, which any step can read with `sudo`. That is how
-the tj-actions/changed-files compromise harvested secrets in March 2025. Minifying now runs in a
-`minify` job inside `lint-and-test.yml` and crosses to the deploy as an artifact. The deploy fetches
+the tj-actions/changed-files compromise harvested secrets in March 2025. Minifying now runs in its
+own reusable workflow, `minify.yml`, and crosses to the deploy as an artifact. The deploy fetches
 it by ID (any job can upload an artifact; only the minify job can set its own outputs), refuses any
 file its own checkout does not expect, refuses symlinks, and checks a digest that binds each
 minified file to the exact source it replaces. [README.md](README.md#minification) states what that
 leaves: a compromised minifier can still poison the files it minifies, and nothing can detect that
 short of not minifying.
 
-`minify` is its own job rather than a step of `lint-and-test`, because Composer runs third-party
-code too. Do not merge the two jobs to save a runner minute.
+`minify.yml` is its own workflow, not a job inside `lint-and-test.yml` (where it first lived) and
+never a step of it. Never a step because Composer runs third-party code too, and a shared VM would
+let a Composer package rewrite the minified output. Not a job in that file because a workflow
+named "lint and test" that also minified was a name that lied. Do not merge them to save a runner
+minute or a stub line.
 
 **Test suites and Composer are detected, not configured.** A repo either has
 `tests/run.php`, or `vendor/bin/phpunit`, or `composer.json`, or none of them.

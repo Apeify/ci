@@ -1,8 +1,8 @@
 name: Lint and test
 
 # Reusable. Syntax-checks the PHP, installs dev dependencies, and runs whichever
-# test suite the repo actually has; in a second job, minifies the CSS and JS
-# that ship. Then publishes the values the deploy step needs.
+# test suite the repo actually has - then publishes the values the deploy step
+# needs. Minifying CSS and JS is minify.yml's job, not this one's.
 #
 # WHY THIS IS A WORKFLOW AND NOT AN ACTION
 #
@@ -24,36 +24,6 @@ name: Lint and test
 #
 # It declares no `environment:`, so environment secrets are never in scope here
 # at all, and `permissions:` is the minimum a checkout needs.
-#
-# WHY MINIFICATION LIVES HERE TOO, IN A JOB OF ITS OWN
-#
-# Minifying runs third-party code (esbuild, fetched from npm) over the CSS and JS
-# that ship. It used to run inside the deploy job, ordered before the SSH key
-# was written, on the theory that the key could not be read before it existed.
-# That theory was wrong. A job's secrets are delivered to the runner when the
-# job STARTS, and the runner process holds them in memory from the first step;
-# every step can `sudo` on a GitHub-hosted runner, so any step can read that
-# memory. That is exactly how the tj-actions/changed-files compromise (March
-# 2025) harvested secrets. Step ordering protects a file, not a job.
-#
-# So the minifier runs in the `minify` job below: its own VM, no environment,
-# no secrets, read-only token. What crosses to the deploy is an artifact plus a
-# handoff value (`minified-assets`) naming the artifact and a digest binding
-# each minified file to the exact source file it was made from. The deploy
-# accepts ONLY files matching what its own checkout says should exist, and
-# refuses the deploy on any difference - see "Apply minified assets" in
-# actions/deploy/action.yml for that half.
-#
-# It is a separate job from lint-and-test, not a step after it, because Composer
-# also runs third-party code. Sharing a VM would let a Composer package rewrite
-# the minified output on its way to the artifact.
-#
-# What this does NOT buy: the minified files are still produced by third-party
-# code and served to visitors. A compromised minifier can still put hostile JS
-# in a file it minifies. Isolation shrinks its reach from "the deploy key, the
-# server, and every file under public/ and app/" to "the content of the CSS and
-# JS it was asked to minify", which is the part that cannot be shrunk further
-# without not minifying at all.
 
 on:
   workflow_call:
@@ -68,14 +38,6 @@ on:
           the branch; set it for a Disaster Recovery or preview target.
         type: string
         default: ''
-      public-dir:
-        description: >-
-          Repo directory whose assets/ subtree is minified. Must name the same
-          directory as the deploy action's `public-dir`. A mismatch is not
-          silent: the deploy compares every file against its own checkout and
-          refuses on any difference.
-        type: string
-        default: 'public'
     outputs:
       environment:
         description: >-
@@ -90,13 +52,6 @@ on:
           consumer omitting this job: `needs.<job>.outputs.*` cannot be
           referenced unless the job exists and is listed in `needs`.
         value: ${{ jobs.lint-and-test.outputs.attestation }}
-      minified-assets:
-        description: >-
-          The handoff from the minify job to the deploy: `none` when there is no
-          CSS or JS to minify, otherwise `<artifact-id>:<sha256>`. Pass it to the
-          deploy action's `minified-assets` input unchanged. Opaque on purpose;
-          its format is a contract between this file and actions/deploy only.
-        value: ${{ jobs.minify.outputs.minified-assets }}
 
 permissions:
   contents: read
@@ -185,160 +140,3 @@ jobs:
           else
             echo "::notice::No test suite found (looked for tests/run.php and vendor/bin/phpunit)."
           fi
-
-  # Third-party code with no secrets in reach. It still holds the runtime
-  # token every job is issued for artifacts and caches, as it did inside the
-  # deploy job. See "WHY MINIFICATION LIVES HERE TOO" at the top of this file.
-  minify:
-    runs-on: ubuntu-latest
-    permissions:
-      # Required: a checkout of a private repo authenticates with GITHUB_TOKEN.
-      # Uploading an artifact needs no grant - it uses a separate runtime token
-      # every job is issued.
-      contents: read
-    outputs:
-      minified-assets: ${{ steps.handoff.outputs.minified-assets }}
-    steps:
-      # persist-credentials: false keeps the token out of .git/config, where
-      # esbuild could read it off disk without trying. It is read-only and
-      # scoped to this repo, so this is tidiness more than a boundary.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # Minify the CSS and JS that ship, so the source can stay heavily
-      # commented for the next person without the comments costing visitors
-      # anything. Measured on these sites: roughly half off each file even
-      # AFTER gzip, and the stylesheet is render-blocking.
-      #
-      # esbuild rather than a hand-rolled regex pass: these stylesheets use
-      # very new CSS (@starting-style, ::details-content, interpolate-size,
-      # transition-behavior, `scripting` queries) and a naive minifier would
-      # quietly drop what it does not understand, breaking animations with no
-      # error. Pinned to an exact version.
-      #
-      # DISCOVERS its targets rather than naming them. Naming files means that
-      # the day someone adds a second stylesheet or a page-specific script, it
-      # ships unminified with every comment intact - silently, and forever.
-      # Discovery also means this skips cleanly when there are no assets at
-      # all, and esbuild is not even downloaded then.
-      #
-      # The size guard is RELATIVE (had content -> has none) rather than an
-      # absolute byte floor. With discovery a legitimately tiny new script
-      # would trip a fixed floor, and padding a file out to clear one would
-      # defeat the very check that is supposed to catch a broken minifier.
-      #
-      # Each file is recorded as (path under public-dir, SHA256 of the source,
-      # SHA256 of the minified result), NUL-separated so no file name can forge
-      # a record boundary, and the digest of those records travels to the
-      # deploy. The SOURCE hash is what lets the deploy prove each minified
-      # file replaces the file it was made from, not merely a file with the
-      # same name - which is what makes a public-dir mismatch between this
-      # workflow and the deploy fail rather than ship the wrong content.
-      #
-      # The digest protects the handoff from OTHER jobs, not from esbuild.
-      # Anything running in this job can rewrite these records too. What limits
-      # esbuild is the deploy's refusal to accept any file its own checkout
-      # does not already have.
-      #
-      # Every value comes from env: and the step contains no expressions, so
-      # tests/minified-assets.test.sh runs it as written, with a stand-in npx.
-      # If a pre-minified vendor file ever lands under public/assets, exclude it
-      # in BOTH discovery passes - this one and the deploy's - or the deploy
-      # will refuse the mismatch.
-      - name: Minify and stage CSS and JS
-        id: stage
-        env:
-          PUBLIC_DIR: ${{ inputs.public-dir }}
-          STAGE_DIR: ${{ runner.temp }}/minified-assets
-        shell: bash
-        run: |
-          targets=()
-          if [ -d "$PUBLIC_DIR/assets" ]; then
-            mapfile -d '' -t targets < <(
-              cd "$PUBLIC_DIR" &&
-                find assets -type f \( -name '*.css' -o -name '*.js' \) -print0 | LC_ALL=C sort -z
-            )
-          fi
-
-          if [ ${#targets[@]} -eq 0 ]; then
-            echo "::notice::No CSS or JS found under ${PUBLIC_DIR}/assets - nothing to minify."
-            echo "count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Install esbuild once; every later npx call reuses the cached binary.
-          npx --yes esbuild@0.25.10 --version
-
-          rm -rf "$STAGE_DIR"
-          mkdir -p "$STAGE_DIR"
-          records="${RUNNER_TEMP}/minified-assets.records"
-          : > "$records"
-
-          for rel in "${targets[@]}"; do
-            f="${PUBLIC_DIR}/${rel}"
-            src_hash=$(sha256sum < "$f" | cut -d' ' -f1)
-            before=$(wc -c < "$f")
-            npx esbuild@0.25.10 "$f" --minify --allow-overwrite --outfile="$f"
-            after=$(wc -c < "$f")
-
-            # Still valid JS after minifying? A minifier that silently emitted
-            # garbage would be worse than one that failed outright.
-            case "$f" in
-              *.js) node --check "$f" ;;
-            esac
-
-            if [ "$before" -gt 0 ] && [ "$after" -eq 0 ]; then
-              echo "::error::$f collapsed from $before bytes to nothing - refusing to hand it to the deploy."
-              exit 1
-            fi
-
-            mkdir -p "${STAGE_DIR}/$(dirname "$rel")"
-            cp -- "$f" "${STAGE_DIR}/${rel}"
-            min_hash=$(sha256sum < "$f" | cut -d' ' -f1)
-            printf '%s\0%s\0%s\0' "$rel" "$src_hash" "$min_hash" >> "$records"
-
-            echo "$f: ${before} -> ${after} bytes"
-          done
-
-          echo "count=${#targets[@]}" >> "$GITHUB_OUTPUT"
-          echo "digest=$(sha256sum < "$records" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      # Named per attempt: "Re-run all jobs" runs this job again in the same
-      # run, and an upload under a name that already exists there fails.
-      # include-hidden-files because discovery above includes them; leaving it
-      # off would drop a dotfile here and fail the deploy's comparison.
-      # One day of retention: the deploy that needs it runs minutes later.
-      - name: Upload minified assets
-        id: upload
-        if: steps.stage.outputs.count != '0'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: minified-assets-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/minified-assets/
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 1
-
-      # The deploy fetches by ID, never by name. Every job in the run holds a
-      # token that can upload artifacts - the Composer job included - so a
-      # name is something another job could claim first. A job output can be
-      # written only by the job that owns it.
-      - name: Publish the handoff
-        id: handoff
-        env:
-          COUNT: ${{ steps.stage.outputs.count }}
-          DIGEST: ${{ steps.stage.outputs.digest }}
-          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
-        shell: bash
-        run: |
-          if [ "$COUNT" = "0" ]; then
-            echo "minified-assets=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if ! [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || ! [[ "$DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::Upload produced no usable artifact id ('${ARTIFACT_ID}') or digest ('${DIGEST}')."
-            exit 1
-          fi
-          echo "minified-assets=${ARTIFACT_ID}:${DIGEST}" >> "$GITHUB_OUTPUT"

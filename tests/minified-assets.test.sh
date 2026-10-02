@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for the minification handoff: the minify job in lint-and-test.yml, and
+# Tests for the minification handoff: the minify job in minify.yml, and
 # the two deploy-action steps that receive what it produced.
 #
 # The two halves live in different files and agree on a record format only by
@@ -23,14 +23,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/harness.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-LINT_AND_TEST="${REPO_ROOT}/.github/workflows/lint-and-test.yml"
+MINIFY_WORKFLOW="${REPO_ROOT}/.github/workflows/minify.yml"
 
 MINIFY="${WORK}/minify.sh"
-extract_run_step "$LINT_AND_TEST" "Minify and stage CSS and JS" > "$MINIFY"
+extract_run_step "$MINIFY_WORKFLOW" "Minify and stage CSS and JS" > "$MINIFY"
 require_shell "$MINIFY" "STAGE_DIR"
 
 PUBLISH="${WORK}/publish.sh"
-extract_run_step "$LINT_AND_TEST" "Publish the handoff" > "$PUBLISH"
+extract_run_step "$MINIFY_WORKFLOW" "Publish the handoff" > "$PUBLISH"
 require_shell "$PUBLISH" "minified-assets="
 
 HANDOFF="${WORK}/handoff.sh"
@@ -232,11 +232,11 @@ assert_eq "" "$(handoff_id)" "none downloads nothing"
 assert_exit 0 "a real value is accepted" run_handoff MINIFIED_ASSETS="42:${D}"
 assert_eq "42" "$(handoff_id)" "the artifact id is extracted"
 assert_refused "input is empty" "a stub that never passed it" run_handoff MINIFIED_ASSETS=
-assert_refused "not a value lint-and-test produces" "a hand-written literal" \
+assert_refused "not a value the minify workflow produces" "a hand-written literal" \
   run_handoff MINIFIED_ASSETS=skip
-assert_refused "not a value lint-and-test produces" "an artifact NAME instead of an id" \
+assert_refused "not a value the minify workflow produces" "an artifact NAME instead of an id" \
   run_handoff MINIFIED_ASSETS="minified-assets-1:${D}"
-assert_refused "not a value lint-and-test produces" "a short digest" \
+assert_refused "not a value the minify workflow produces" "a short digest" \
   run_handoff MINIFIED_ASSETS="42:abc"
 mkdir -p "${WORK}/dl/assets"; touch "${WORK}/dl/assets/stale.css"
 run_handoff MINIFIED_ASSETS=none >/dev/null 2>&1
